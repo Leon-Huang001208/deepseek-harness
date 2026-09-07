@@ -140,6 +140,14 @@ cachedSnapshot(meta: SessionHeader): ProjectionSnapshot | undefined
 async write(session: Session): Promise<void>
 
 /**
+ * Permanently remove one session's derived checkpoint. The caller must first
+ * quiesce any live owner so a later detach cannot recreate the row.
+ * @param id - session identity whose checkpoint must be removed.
+ * @returns whether a stored checkpoint existed.
+ */
+delete(id: SessionId): Promise<boolean>
+
+/**
  * Cold-read one persisted session's projections with zero full-log load:
  * cached rows + a persistence `readFrom` tail from the registry's restore
  * floor, refolded by the registry and written back (fail-soft) so the next

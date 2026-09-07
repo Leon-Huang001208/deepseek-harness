@@ -7,7 +7,7 @@ import {
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator,
   type PersistenceBackend, type SessionPersistenceSnapshot, type StoredPrefix, type StoredSuffix,
 } from '../src/index.ts'
-import { runPersistenceContract, meta, oneTurnLog } from './contract.ts'
+import { appendLog, runPersistenceContract, meta, oneTurnLog } from './contract.ts'
 import { runCoordinatorContract, type CoordinatorFixture } from './coordinator-contract.ts'
 
 /** The durable store shape: materialized sessions only (no lazy entries). */
@@ -101,6 +101,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
     return this.coordinator.append(id, events)
   }
 
+  override delete(id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    return this.coordinator.delete(id, signal)
+  }
+
   override prepare(id: SessionId, signal?: AbortSignal): ReturnType<PersistenceCoordinator['prepare']> {
     return this.coordinator.prepare(id, signal)
   }
@@ -134,6 +138,11 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
   async readStoredRevision(id: SessionId): Promise<SessionPersistenceRevision | undefined> {
     const entry = this.store.get(id)
     return entry === undefined ? undefined : memoryRevision(entry)
+  }
+
+  async deleteStored(id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted()
+    return this.store.delete(id)
   }
 
   async appendBatch(m: SessionHeader, events: readonly SessionEvent[], _isMaterialized: boolean): Promise<void> {
@@ -212,6 +221,11 @@ class ControlledBackend implements PersistenceBackend<never> {
     return entry === undefined ? undefined : memoryRevision(entry)
   }
 
+  async deleteStored(id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted()
+    return this.store.delete(id)
+  }
+
   async appendBatch(m: SessionHeader, events: readonly SessionEvent[], _isMaterialized: boolean): Promise<void> {
     this.lastAppendedBatch = events
     const attempt = ++this.appendAttempts
@@ -268,6 +282,32 @@ describe('the inherited readRaw default', () => {
     await expect(
       ctx.sessionPersistence.readRaw(SessionId('any-session'), controller.signal),
     ).rejects.toThrow('aborted')
+  })
+})
+
+describe('the deletion ownership boundary', () => {
+  it('rejects a live session and succeeds after its owner retires', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const persistenceFiber = await ctx.plugin(MemoryPersistence)
+    const id = SessionId('delete-live-owner')
+    let session!: Session
+    const ownerFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      session = inner.sessions.create(id)
+    }, { inject: ['sessions'] }))
+
+    try {
+      appendLog(session, oneTurnLog())
+      await ctx.sessions.flush(session)
+      await expect(ctx.sessionPersistence.delete(id)).rejects.toThrow('cannot delete live session')
+
+      await ownerFiber.dispose()
+      await expect(ctx.sessionPersistence.delete(id)).resolves.toBe(true)
+    } finally {
+      await ownerFiber.dispose()
+      await persistenceFiber.dispose()
+      await ctx.fiber.dispose()
+    }
   })
 })
 

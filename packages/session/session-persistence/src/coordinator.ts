@@ -151,6 +151,9 @@ export interface PersistenceBackend<TornMarker = unknown> {
    */
   readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceRevision | undefined>
 
+  /** Permanently remove one backend-owned cold identity; absent ids are idempotent. */
+  deleteStored?(id: SessionId, signal?: AbortSignal): Promise<boolean>
+
   /**
    * Optional seek-capable suffix read behind the service's `readFrom`: return
    * the header plus the stored events with `seq >= fromSeq` without reading
@@ -640,6 +643,30 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       return Promise.reject(new TypeError('session metadata createdAt must be a non-negative safe integer'))
     }
     return this.serialize(snapshot.id, () => this.createCore(snapshot))
+  }
+
+  /**
+   * Permanently delete one cold identity after pending retirement reaches durability.
+   * @param id - session identity to remove.
+   * @param signal - optional cancellation before irreversible backend commit.
+   * @returns whether tracked or materialized state existed for the identity.
+   */
+  async delete(id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    await this.waitForRetirement(id, signal)
+    return this.serialize(id, async () => {
+      signal?.throwIfAborted()
+      if (this.ctx.sessions.get(id) !== undefined) {
+        throw new Error(`cannot delete live session "${id}"`)
+      }
+      this.preparations.assertWritable(id)
+      const tracked = this.states.delete(id)
+      this.preparations.invalidate(id)
+      if (this.backend.deleteStored === undefined) {
+        throw new Error(`session persistence backend "${this.backend.name}" does not support deletion`)
+      }
+      const removed = await this.backend.deleteStored(id, signal)
+      return tracked || removed
+    }, signal)
   }
 
   private async createCore(meta: SessionHeader): Promise<void> {

@@ -317,6 +317,15 @@ export interface SessionsApi {
   Promise<RpcResponse<{ title: string; seq: number }>>
 
   /**
+   * Permanently deletes one ordinary session after its owned Agent reaches
+   * quiescence. `cascade` includes every durable descendant; omitting it
+   * refuses a parent that still has children. The operation clears primary
+   * persistence and mounted derived stores and is idempotent for a missing id.
+   */
+  delete(request: RpcRequest<{ sessionId: SessionId; cascade?: boolean }>):
+  Promise<RpcResponse<{ deletedSessionIds: SessionId[] }>>
+
+  /**
    * Sends a message. content is core's ContentBlock[] verbatim; mode maps 1:1 — queue→send, steer→steer.
    * A prompt whose content is exactly one text block starting with '/' is a slash command: the host
    * executes it through the command registry (mode-agnostic) and it is never sent to the model. A

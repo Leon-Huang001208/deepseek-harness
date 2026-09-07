@@ -124,6 +124,21 @@ export abstract class SessionPersistence extends Service {
   }
 
   /**
+   * Permanently delete one cold session's durable log. Implementations reject
+   * while the identity is live or exclusively reserved and resolve `false`
+   * when no stored log exists, making cleanup retries idempotent.
+   * @param _id - persisted session identity to delete.
+   * @param signal - optional cancellation before the durable deletion commits.
+   * @returns whether this call removed a stored log.
+   */
+  delete(_id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted === true) {
+      return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+    }
+    return Promise.reject(new Error('this session persistence backend does not support deletion'))
+  }
+
+  /**
    * Register a new session's metadata. A backend MAY defer the physical write
    * until the first {@link append} (lazy materialization), in which case a
    * created-but-never-appended session is absent from {@link list}

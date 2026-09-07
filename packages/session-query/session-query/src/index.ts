@@ -127,6 +127,18 @@ export abstract class SessionQueryEngine extends Service {
   ): Promise<SessionEventSearchPage>
 
   /**
+   * Remove one session from backend-owned derived indexes. Providers without
+   * durable index state may keep the default no-op; authoritative content is
+   * deleted through `SessionPersistence`.
+   * @param _sessionId - session identity whose derived rows must be forgotten.
+   * @param signal - optional cancellation before the derived deletion commits.
+   */
+  forgetSession(_sessionId: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    return Promise.resolve()
+  }
+
+  /**
    * List the complete logical corpus using live-preferred records.
    * @param signal - optional cancellation for persistence listing.
    * @returns deterministic newest-first cloned session records.

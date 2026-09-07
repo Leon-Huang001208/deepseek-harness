@@ -255,6 +255,28 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * Remove a permanently deleted session from every workspace, the archive
+   * set, and the registry's header/path caches. Session persistence remains
+   * the caller's responsibility.
+   * @param sessionId - session identity that has entered permanent deletion.
+   */
+  forgetSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      for (const workspace of this.list()) await workspace.detachSession(sessionId)
+      const state = this.requireState()
+      if (state.archivedSessionIds.includes(sessionId)) {
+        await this.setState({
+          ...state,
+          archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
+        })
+      }
+      this.headers.delete(sessionId)
+      this.sessionPaths.delete(sessionId)
+      this.invalidSessionPaths.delete(sessionId)
+    })
+  }
+
+  /**
    * Whether a session is live, header-indexed, or present in a fresh
    * persistence listing. Only a definite miss returns false — a failing
    * `sessionPersistence.list()` propagates so storage faults never

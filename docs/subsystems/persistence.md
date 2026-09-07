@@ -4,7 +4,7 @@ English | [中文](persistence.zh.md)
 
 The **durability seam** for the event log. [session.md](session.md) describes the in-memory `Session` — the append-only `SessionEvent` log that is the source of truth. This page describes how that log is made durable: the abstract `SessionPersistence` service, its backends, the flush checkpoint, crash recovery, and the metadata header that travels alongside the log. The event vocabulary the log carries is enumerated, member by member, in the generated [persistence log event catalog](../persistence-catalog.md).
 
-The seam is a [capability seam](../../.agents/notes/implemented/architecture/2026-06-13-capability-seams.md): one abstract service ([dsh-session-persistence](../../packages/session/session-persistence), `ctx.sessionPersistence`) defining locate/create/append, reusable Session preparation, logical load/inspect, physical suffix reads, and lightweight list/snapshot observation over the existing `SessionEvent` — **no parallel persisted event type** — and three interchangeable providers implementing the same contract. See the [session-persistence Agent Note](../../.agents/notes/implemented/architecture/2026-06-14-session-persistence.md).
+The seam is a [capability seam](../../.agents/notes/implemented/architecture/2026-06-13-capability-seams.md): one abstract service ([dsh-session-persistence](../../packages/session/session-persistence), `ctx.sessionPersistence`) defining locate/create/append/delete, reusable Session preparation, logical load/inspect, physical suffix reads, and lightweight list/snapshot observation over the existing `SessionEvent` — **no parallel persisted event type** — and three interchangeable providers implementing the same contract. See the [session-persistence Agent Note](../../.agents/notes/implemented/architecture/2026-06-14-session-persistence.md).
 
 ## The flush checkpoint
 
@@ -17,6 +17,8 @@ A backend that reloads a log crashed mid-turn finds an open `turn/start` with no
 Repair applies only to cold sessions. For a live id, `SessionPersistence.load(id)` waits until the authoritative in-memory snapshot is durable and returns it only when balanced; an open live turn rejects rather than receiving synthetic interruption boundaries. HMR adopts a live prefix without closing its active turn.
 
 `SessionPersistence.inspect(id)` constructs an immutable logical Session without publishing it or writing recovery. Cold inspection balances an interrupted turn in memory while leaving torn physical tails untouched; inspection of an already-live Session borrows its current immutable snapshot and may therefore contain an open turn. Coordinator-backed implementations retain the exact cold unpublished Session in a bounded LRU, so repeated history reads and a later `prepare(id)` share one read, decompression, validation, freeze, and Session construction. `prepare(id)` reserves the Session, commits pending repair, and returns a disposable publication handle; `load(id)` uses the same machinery to commit repair without publication. The [Session preparation decision](../../.agents/notes/implemented/architecture/2026-08-05-session-preparation.md) owns this lifecycle.
+
+`SessionPersistence.delete(id, signal?)` permanently removes only a cold session's primary record. A live or prepared session rejects, while a missing or lazily created but never-materialized id reports `false`, which makes retry safe after an uncertain caller-side failure. JSONL unlinks the exact resolved transcript and removes only an empty container; SQLite deletes the session row transactionally and lets its foreign key cascade the event rows. The service owns no retention clock: products decide their own grace period and invoke deletion only after derived state has been made retryable.
 
 ## `SessionLocation` — optional per-session artifact target
 
@@ -230,7 +232,7 @@ interface SessionPersistenceSnapshot {
 
 ## The backends
 
-All implement the same abstract `SessionPersistence` (locate/create/append/prepare/load/inspect/readFrom/list/listSnapshots over `SessionEvent`, with optional cancellation on observation methods) and pass the shared `runPersistenceContract` suite:
+All implement the same abstract `SessionPersistence` (locate/create/append/delete/prepare/load/inspect/readFrom/list/listSnapshots over `SessionEvent`, with optional cancellation on observation and deletion methods) and pass the shared `runPersistenceContract` suite:
 
 - **[dsh-session-persistence-jsonl](../../packages/session/session-persistence-jsonl)** — an append-only logical JSONL log per session, stored as checksummed concatenated Zstandard frames by default or raw lines by configuration, with crash-safe atomic writes, interrupted-turn recovery, and a read/replay path.
 - **[dsh-session-persistence-sqlite](../../packages/session/session-persistence-sqlite)** — an opt-in `node:sqlite` backend using schema 17 to store exact same-block delta runs in bounded physical `text-chunks`, `reasoning-chunks`, and `tool-call-chunks` rows. It reconstructs the complete logical event stream before returning it, packs only newly durable batches, and rejects older schemas rather than migrating them.
@@ -275,6 +277,16 @@ abstract locate(meta: SessionHeader): SessionLocation | undefined
  * @throws when this backend does not expose per-session raw artifacts.
  */
 readRaw(_id: SessionId, signal?: AbortSignal): Promise<SessionRawArtifact | undefined>
+
+/**
+ * Permanently delete one cold session's durable log. Implementations reject
+ * while the identity is live or exclusively reserved and resolve `false`
+ * when no stored log exists, making cleanup retries idempotent.
+ * @param _id - persisted session identity to delete.
+ * @param signal - optional cancellation before the durable deletion commits.
+ * @returns whether this call removed a stored log.
+ */
+delete(_id: SessionId, signal?: AbortSignal): Promise<boolean>
 
 /**
  * Register a new session's metadata. A backend MAY defer the physical write
