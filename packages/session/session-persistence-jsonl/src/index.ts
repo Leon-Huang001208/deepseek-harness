@@ -9,7 +9,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { readdirSync } from 'node:fs'
-import { open, mkdir, readFile, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readFile, readdir, realpath, link, lstat, rm, rmdir, stat, truncate, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -181,6 +181,10 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return this.coordinator.append(id, events)
   }
 
+  override delete(id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    return this.coordinator.delete(id, signal)
+  }
+
   override prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
     return this.coordinator.prepare(id, signal)
   }
@@ -234,6 +238,27 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       if (isENOENT(error)) return undefined
       throw error
     }
+  }
+
+  /** Delete only the exact per-session artifact and then its empty container. */
+  async deleteStored(id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return false
+    const entry = await lstat(path)
+    if (!entry.isFile() && !entry.isSymbolicLink()) {
+      throw new Error(`refusing to delete non-file session artifact "${path}"`)
+    }
+    signal?.throwIfAborted()
+    await unlink(path)
+    try {
+      await rmdir(dirname(path))
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException | null)?.code
+      if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw error
+    }
+    return true
   }
 
   /**

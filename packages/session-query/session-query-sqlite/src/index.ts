@@ -312,6 +312,36 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     })
   }
 
+  /** Permanently remove persisted and live derived rows and invalidate cursors. */
+  override forgetSession(sessionId: SessionId, signal?: AbortSignal): Promise<void> {
+    return this._serialized(signal, async () => {
+      await this._ensureReady(signal)
+      assertNotAborted(signal)
+      const db = this._requireDb()
+      const nextGeneration = this._mainGeneration() + 1
+      let began = false
+      try {
+        db.exec('BEGIN IMMEDIATE')
+        began = true
+        this._deleteSession('persisted', sessionId)
+        this._deleteSession('live', sessionId)
+        db.prepare('UPDATE search_state SET global_generation = ? WHERE singleton = 1').run(nextGeneration)
+        db.exec('COMMIT')
+      } catch (error: unknown) {
+        if (began) {
+          try { db.exec('ROLLBACK') } catch { /* preserve the deletion failure */ }
+        }
+        throw new SessionQueryError(
+          `session-search index deletion failed: ${errorMessage(error)}`,
+          'SESSION_QUERY_INDEX_FAILED',
+          { cause: error },
+        )
+      }
+      this._globalGeneration = nextGeneration
+      this._localGeneration = Math.max(this._localGeneration, nextGeneration)
+    })
+  }
+
   /** Close the database after every accepted operation reaches quiescence. */
   close(): Promise<void> {
     this._closePromise ??= this._close()

@@ -36,6 +36,8 @@ The read ladder, zero full-log load on the happy path: cached rows → `sessionP
 
 `write(session)` is the synchronous-cut checkpoint both mandatory points use; carriers may call it directly (not fail-soft — the fail-soft wrappers own containment).
 
+`delete(id)` removes the complete cache record for a permanently deleted Session. It does not inspect or mutate the event log; the irreversible host deletion flow calls it before removing primary persistence so a cache failure leaves the source record available for retry.
+
 ## Composition
 
 ```yaml

@@ -53,6 +53,7 @@ function scriptedApi(overrides: {
         selected: { provider: r.payload.provider, model: r.payload.model },
       }),
       rename: r => ok(r, { title: 'renamed', seq: 0 }),
+      delete: r => ok(r, { deletedSessionIds: [r.payload.sessionId] }),
       fork: r => ok(r, { sessionId: sid('s-fork') }),
       prompt: r => ok(r, { accepted: true as const }),
       attachment: r => ok(r, {

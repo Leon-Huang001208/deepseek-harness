@@ -83,6 +83,34 @@ export function appendLog(session: Session, events: readonly SessionEvent[]): vo
  */
 export function runPersistenceContract(name: string, make: () => Promise<ContractBackend>): void {
   describe(`SessionPersistence contract: ${name}`, () => {
+    it('permanently deletes a cold session and makes a missing retry idempotent', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const m = meta('delete-cold', '/work')
+        await persistence.create(m)
+        await persistence.append(m.id, oneTurnLog())
+
+        await expect(persistence.delete(m.id)).resolves.toBe(true)
+        await expect(persistence.delete(m.id)).resolves.toBe(false)
+        expect((await persistence.list()).some(header => header.id === m.id)).toBe(false)
+        await expect(persistence.load(m.id)).rejects.toThrow(/not found/)
+      } finally {
+        await dispose()
+      }
+    })
+
+    it('releases an unmaterialized identity deleted before its first append', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const m = meta('delete-lazy')
+        await persistence.create(m)
+        await expect(persistence.delete(m.id)).resolves.toBe(true)
+        await expect(persistence.create(m)).resolves.toBeUndefined()
+      } finally {
+        await dispose()
+      }
+    })
+
     it('round-trips a session: create + append → load returns identical meta and byte-identical events', async () => {
       const { persistence, dispose } = await make()
       try {

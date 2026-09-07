@@ -260,6 +260,20 @@ export class SqliteStore implements PersistenceBackend<number> {
     }))
   }
 
+  /** Delete the session row; the foreign-key cascade removes its event rows. */
+  async deleteStored(id: SessionId, signal?: AbortSignal): Promise<boolean> {
+    await this.observe(signal)
+    signal?.throwIfAborted()
+    this.db.exec(sql('begin-immediate'))
+    try {
+      const result = this.db.prepare(sql('delete-session')).run(id)
+      this.db.exec(sql('commit'))
+      return Number(result.changes) === 1
+    } catch (error: unknown) {
+      this.rollback(error, 'delete session')
+    }
+  }
+
   async close(): Promise<void> {
     if (this.ready === undefined) {
       if (this.pathReady !== undefined) await Promise.allSettled([this.pathReady])

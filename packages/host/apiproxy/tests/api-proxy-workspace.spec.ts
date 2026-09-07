@@ -75,21 +75,31 @@ async function harness(
   const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', storageDomain)
   ctx.provide('storageDomain', storageDomain)
-  ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+  const deletedSessions: SessionId[] = []
+  ctx.provide('sessionPersistence', {
+    list: () => Promise.resolve([]),
+    delete: (sessionId: SessionId) => {
+      deletedSessions.push(sessionId)
+      return Promise.resolve(true)
+    },
+  } as never)
   await ctx.plugin(WorkspaceRegistry)
 
   const factory: AgentFactory = {
     async createAgent(_ownerCtx, options) {
-      const session = ctx.sessions.create(
+      const session = ctx.sessions.prepare(
         options.sessionId,
         options.meta === undefined ? {} : { meta: options.meta },
       )
+      const detachSession = ctx.sessions.enter(session)
+      ctx.sessions.announce(session)
       const agent = stubAgent(session)
       const unregister = ctx.agents.register(agent)
       return {
         agent,
         dispose: () => {
           unregister()
+          detachSession()
           return Promise.resolve()
         },
       }
@@ -108,7 +118,7 @@ async function harness(
     ...extras.openPath === undefined ? {} : { openPath: extras.openPath },
     ...extras.canOpenPath === undefined ? {} : { canOpenPath: extras.canOpenPath },
   })
-  return { api, ctx, storageDomain, root }
+  return { api, ctx, storageDomain, root, deletedSessions }
 }
 
 /** Stage one directory under the harness root for path adoption. */
@@ -365,6 +375,53 @@ describe('workspace.insertBefore', () => {
 })
 
 describe('session creation and Workspace membership', () => {
+  it('permanently deletes an API-owned idle session and confirms the native identity', async () => {
+    const { api, ctx, deletedSessions } = await harness()
+    const sessionId = SessionId('session-permanent-delete')
+    expectOk(await api.sessions.create(request({ sessionId })))
+
+    expect(expectOk(await api.sessions.delete(request({ sessionId, cascade: true }))).deletedSessionIds)
+      .toEqual([sessionId])
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
+    expect(ctx.sessions.get(sessionId)).toBeUndefined()
+    expect(deletedSessions).toEqual([sessionId])
+  })
+
+  it('refuses permanent deletion while the session agent is running', async () => {
+    const { api, ctx, deletedSessions } = await harness()
+    const sessionId = SessionId('session-running-delete')
+    expectOk(await api.sessions.create(request({ sessionId })))
+    Object.assign(ctx.agents.get(sessionId)!, { status: 'running' })
+
+    const response = await api.sessions.delete(request({ sessionId, cascade: true }))
+
+    expect(response.result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'session-delete-blocked',
+        details: { sessionId, reason: 'session agent is running' },
+      },
+    })
+    expect(deletedSessions).toEqual([])
+    expect(ctx.sessions.get(sessionId)).toBeDefined()
+  })
+
+  it('requires cascade while descendant session logs remain', async () => {
+    const { api, ctx, deletedSessions } = await harness()
+    const parentId = SessionId('session-delete-parent')
+    const childId = SessionId('session-delete-child')
+    expectOk(await api.sessions.create(request({ sessionId: parentId })))
+    ctx.sessions.create(childId, { meta: { parentSession: parentId } })
+
+    const response = await api.sessions.delete(request({ sessionId: parentId }))
+
+    expect(response.result).toMatchObject({
+      ok: false,
+      error: { code: 'session-delete-blocked', details: { sessionId: parentId } },
+    })
+    expect(deletedSessions).toEqual([])
+  })
+
   it('attaches a preallocated idempotent session while cwd-only sessions stay ungrouped', async () => {
     const { api, ctx, root } = await harness()
     const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'project') }))).workspace

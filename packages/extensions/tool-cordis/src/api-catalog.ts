@@ -1200,6 +1200,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['when this backend does not expose per-session raw artifacts.'],
       },
       {
+        signature: 'delete(_id: SessionId, signal?: AbortSignal): Promise<boolean>',
+        description: 'Permanently delete one cold session\'s durable log. Implementations reject while the identity is live or exclusively reserved and resolve `false` when no stored log exists, making cleanup retries idempotent.',
+        parameters: [{ name: '_id', description: 'persisted session identity to delete.' }, { name: 'signal', description: 'optional cancellation before the durable deletion commits.' }],
+        returns: 'whether this call removed a stored log.',
+      },
+      {
         signature: 'abstract create(meta: SessionHeader): Promise<void>',
         description: 'Register a new session\'s metadata. A backend MAY defer the physical write until the first append (lazy materialization), in which case a created-but-never-appended session is absent from list — abandoned sessions leave nothing behind.',
         parameters: [{ name: 'meta', description: 'the immutable header (id, version, cwd, lineage) to record.' }],
@@ -1263,6 +1269,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Durably checkpoint one live session NOW (both mandatory points call this; tests and carriers may too). The registry cut is snapshotted at this boundary (states are live references), then the whole record is replaced. NOT fail-soft — callers on the fail-soft paths contain it.',
         parameters: [{ name: 'session', description: 'the live session to checkpoint.' }],
         returns: 'resolution after durability and event emission.',
+      },
+      {
+        signature: 'delete(id: SessionId): Promise<boolean>',
+        description: 'Permanently remove one session\'s derived checkpoint. The caller must first quiesce any live owner so a later detach cannot recreate the row.',
+        parameters: [{ name: 'id', description: 'session identity whose checkpoint must be removed.' }],
+        returns: 'whether a stored checkpoint existed.',
       },
       {
         signature: 'async coldSnapshot(id: SessionId, signal?: AbortSignal): Promise<ProjectionSnapshot>',
@@ -1349,6 +1361,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Search events within one live-preferred logical session.',
         parameters: [{ name: 'request', description: 'target session, query text, filters, page size, and cursor.' }, { name: 'exec', description: 'optional cancellation control.' }],
         returns: 'matching event hits and their target header from one indexed generation.',
+      },
+      {
+        signature: 'forgetSession(_sessionId: SessionId, signal?: AbortSignal): Promise<void>',
+        description: 'Remove one session from backend-owned derived indexes. Providers without durable index state may keep the default no-op; authoritative content is deleted through `SessionPersistence`.',
+        parameters: [{ name: '_sessionId', description: 'session identity whose derived rows must be forgotten.' }, { name: 'signal', description: 'optional cancellation before the derived deletion commits.' }],
       },
       {
         signature: 'listSessions(signal?: AbortSignal): Promise<SessionRecord[]>',
@@ -2352,6 +2369,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Archive one session durably. The session must exist (live or in session persistence); its workspace accounting — or lack of one — is irrelevant. An already archived id resolves without writing.',
         parameters: [{ name: 'sessionId', description: 'The session to archive.' }],
         returns: 'resolution after durability.',
+      },
+      {
+        signature: 'forgetSession(sessionId: SessionId): Promise<void>',
+        description: 'Remove a permanently deleted session from every workspace, the archive set, and the registry\'s header/path caches. Session persistence remains the caller\'s responsibility.',
+        parameters: [{ name: 'sessionId', description: 'session identity that has entered permanent deletion.' }],
       },
       {
         signature: 'async resolveByPath(path: string): Promise<Workspace | undefined>',
