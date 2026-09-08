@@ -368,6 +368,14 @@ insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly Workspac
 archiveSession(sessionId: SessionId): Promise<void>
 
 /**
+ * Remove a permanently deleted session from every workspace account, the
+ * archive set, and registry lookup caches. Persistence remains the caller's
+ * responsibility.
+ * @param sessionId - session identity entering permanent deletion.
+ */
+forgetSession(sessionId: SessionId): Promise<void>
+
+/**
  * Resolve by canonical directory path without creating or mutating a
  * workspace. A missing path rejects during `realpath`; an existing unowned
  * directory returns `undefined`.

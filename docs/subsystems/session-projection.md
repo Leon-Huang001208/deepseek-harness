@@ -179,6 +179,14 @@ hydratePrepared( session: Session, events: readonly SessionEvent[], ): Projectio
 async write(session: Session): Promise<void>
 
 /**
+ * Permanently remove one session's derived checkpoint. The caller must
+ * quiesce live owners first so a later detach cannot recreate the record.
+ * @param id - session identity whose checkpoint must be removed.
+ * @returns whether a stored checkpoint existed.
+ */
+delete(id: SessionId): Promise<boolean>
+
+/**
  * Cold-read one session's projections from its complete log. Each unit is
  * seeded from the identity-checked cached rows — the registry skips `apply`
  * for the already-folded prefix (events at or below the row's `seq`) — and
@@ -194,7 +202,7 @@ async write(session: Session): Promise<void>
 coldSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, events: readonly SessionEvent[], ): ProjectionSnapshot
 ```
 
-Types: [Session](session.md) · [SessionEvent](session.md) · [SessionHeader](persistence.md) · [SessionLogOffset](session.md)
+Types: [Session](session.md) · [SessionEvent](session.md) · [SessionHeader](persistence.md) · [SessionId](core.md) · [SessionLogOffset](session.md)
 
 Source: [`packages/session/session-projection-cache/src/index.ts`](../../packages/session/session-projection-cache/src/index.ts)
 

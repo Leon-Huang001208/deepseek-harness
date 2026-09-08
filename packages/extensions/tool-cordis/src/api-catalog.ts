@@ -1507,6 +1507,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the accepted title and durable event sequence.',
       },
       {
+        signature: '@Remote(\'delete\') async delete(request: SessionDeleteRequest, signal: AbortSignal): Promise<SessionDeleteValue>',
+        description: 'Permanently delete one ordinary Session and every descendant after all live owners reach quiescence. Derived owners are cleaned deepest-first before each authoritative log is removed.',
+        parameters: [{ name: 'request', description: 'ordinary root Session identity.' }, { name: 'signal', description: 'Remote request cancellation before destructive commits.' }],
+        returns: 'stable deepest-first identities removed by the cascade.',
+      },
+      {
         signature: '@Remote(\'fork\') fork(request: SessionForkRequest): Promise<SessionForkValue>',
         description: 'Fork one cold-readable completed-turn prefix into a new Session.',
         parameters: [{ name: 'request', description: 'source Session and optional event anchor.' }],
@@ -1607,6 +1613,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'options', description: 'optional cancellation.' }],
         returns: 'one snapshot per stored session.',
       },
+      {
+        signature: 'delete(_id: SessionId, options?: SessionPersistenceDeleteOptions): Promise<void>',
+        description: 'Permanently delete one stored session after proving that no writer owns it. Once physical deletion begins, cancellation no longer interrupts the operation so callers never observe an ambiguous partial result.',
+        parameters: [{ name: '_id', description: 'the stored session to delete.' }, { name: 'options', description: 'optional cancellation before the destructive commit.' }],
+        returns: 'resolution after the durable session records are absent.',
+        throws: ['{SessionPersistenceNotFoundError} when the session does not exist.', '{SessionAlreadyOwnedError} while a writer owns the session.'],
+      },
     ],
   },
   {
@@ -1637,6 +1650,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Durably checkpoint one live session NOW (all mandatory points call this; tests and carriers may too). The registry cut is snapshotted at this boundary (states are live references), then the session\'s record is replaced on the domain\'s write chain. NOT fail-soft — callers on the fail-soft paths contain it.',
         parameters: [{ name: 'session', description: 'the live session to checkpoint.' }],
         returns: 'resolution after durability and event emission.',
+      },
+      {
+        signature: 'delete(id: SessionId): Promise<boolean>',
+        description: 'Permanently remove one session\'s derived checkpoint. The caller must quiesce live owners first so a later detach cannot recreate the record.',
+        parameters: [{ name: 'id', description: 'session identity whose checkpoint must be removed.' }],
+        returns: 'whether a stored checkpoint existed.',
       },
       {
         signature: 'coldSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, events: readonly SessionEvent[], ): ProjectionSnapshot',
@@ -1741,6 +1760,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Search events within one live-preferred logical session.',
         parameters: [{ name: 'request', description: 'target session, query text, filters, page size, and cursor.' }, { name: 'exec', description: 'optional cancellation control.' }],
         returns: 'matching event hits and their target header from one indexed generation.',
+      },
+      {
+        signature: 'async forgetSession(sessionId: SessionId, signal?: AbortSignal): Promise<void>',
+        description: 'Remove provider-owned derived state for a permanently deleted session. The shared prepared-observation cache is invalidated before the provider hook runs; authoritative content remains the persistence owner\'s concern.',
+        parameters: [{ name: 'sessionId', description: 'session identity whose derived state must be forgotten.' }, { name: 'signal', description: 'optional cancellation before a provider commit.' }],
       },
       {
         signature: 'listSessions(signal?: AbortSignal): Promise<SessionRecord[]>',
@@ -2974,6 +2998,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Archive one session durably. The session must exist (live or in session persistence); its workspace accounting — or lack of one — is irrelevant. An already archived id resolves without writing.',
         parameters: [{ name: 'sessionId', description: 'The session to archive.' }],
         returns: 'resolution after durability.',
+      },
+      {
+        signature: 'forgetSession(sessionId: SessionId): Promise<void>',
+        description: 'Remove a permanently deleted session from every workspace account, the archive set, and registry lookup caches. Persistence remains the caller\'s responsibility.',
+        parameters: [{ name: 'sessionId', description: 'session identity entering permanent deletion.' }],
       },
       {
         signature: 'async resolveByPath(path: string): Promise<Workspace | undefined>',
@@ -5048,6 +5077,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionCreateValue {\n    readonly sessionId: SessionId;\n    readonly agentPreset?: string;\n}',
   },
   {
+    name: 'SessionDeleteRequest',
+    declaration: 'export interface SessionDeleteRequest {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'SessionDeleteValue',
+    declaration: 'export interface SessionDeleteValue {\n    readonly deletedSessionIds: readonly SessionId[];\n}',
+  },
+  {
     name: 'SessionEvent',
     declaration: 'export type SessionEvent<T extends SessionEventType = SessionEventType> = {\n    [K in SessionEventType]: {\n        type: K;\n        seq: SessionSeq;\n        time: number;\n        data: SessionEventMap[K];\n        ignorable?: true;\n    } & (K extends SurfaceEventType ? {\n        sourceEventSeqs?: SessionSeq[];\n        surfaceOp?: SurfaceOp;\n    } : object);\n}[T];',
   },
@@ -5226,6 +5263,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionPersistenceCreateOptions',
     declaration: 'export interface SessionPersistenceCreateOptions {\n    readonly signal?: AbortSignal;\n    readonly inheritedEventCount?: SessionLogOffset;\n}',
+  },
+  {
+    name: 'SessionPersistenceDeleteOptions',
+    declaration: 'export interface SessionPersistenceDeleteOptions {\n    readonly signal?: AbortSignal;\n}',
   },
   {
     name: 'SessionPersistenceListOptions',

@@ -211,6 +211,31 @@ describe('SessionObservationReader live path', () => {
 })
 
 describe('SessionObservationReader cold path', () => {
+  it('forgets a cached cold observation before permanent deletion', async () => {
+    const ctx = await readerContext()
+    const meta = header('forget-cold')
+    const store = new Map([[meta.id, { header: meta, events: [messageEvent(0, 'old')], revision: 'r1' }]])
+    const counters = { stat: 0, open: 0, read: 0 }
+    ctx.provide('sessionPersistence', stubPersistence(store, counters))
+    const reader = new SessionObservationReader(ctx)
+
+    using first = await reader.read(meta.id, { projectionMode: 'none' })
+    const firstEvent = first.events[0]
+    expect(firstEvent?.type).toBe('user/message')
+    if (firstEvent?.type !== 'user/message') throw new Error('expected user message')
+    expect(firstEvent.data.content).toEqual([{ type: 'text', text: 'old' }])
+    store.set(meta.id, { header: meta, events: [messageEvent(0, 'new')], revision: 'r1' })
+
+    ;(reader as unknown as { forget(id: SessionIdType): void }).forget(meta.id)
+    using second = await reader.read(meta.id, { projectionMode: 'none' })
+    const secondEvent = second.events[0]
+    expect(secondEvent?.type).toBe('user/message')
+    if (secondEvent?.type !== 'user/message') throw new Error('expected user message')
+    expect(secondEvent.data.content).toEqual([{ type: 'text', text: 'new' }])
+    expect(counters.open).toBe(2)
+    await ctx.fiber.dispose()
+  })
+
   it('balances an interrupted stored turn in memory and exposes the durable revision', async () => {
     const ctx = await readerContext()
     const meta = header('interrupted-cold')

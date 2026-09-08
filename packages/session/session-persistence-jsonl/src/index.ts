@@ -13,7 +13,7 @@ import {
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
 import { readdirSync, type Dirent } from 'node:fs'
-import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readdir, realpath, link, lstat, rm, stat, truncate, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -27,11 +27,11 @@ import {
   type SessionHandleReadResult,
   type SessionLocation, type SessionPersistenceCreateOptions,
   type SessionPersistenceListOptions, type SessionPersistenceOpenOptions,
-  type SessionPersistenceSnapshot, type SessionPersistenceStatOptions,
+  type SessionPersistenceDeleteOptions, type SessionPersistenceSnapshot, type SessionPersistenceStatOptions,
   type SessionPersistenceRevision as PersistenceRevision,
 } from '@deepseek-ai/dsh-session-persistence'
 import { JsonlBackendTracker, JsonlSessionHandle, type StorageHandleState } from './storage.ts'
-import { SessionWriteLease } from './lease.ts'
+import { LEASE_FILENAME, SessionWriteLease } from './lease.ts'
 import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import {
@@ -489,6 +489,62 @@ class JsonlSessionPersistence extends SessionPersistence {
     return snapshots
   }
 
+  /**
+   * Permanently remove every stored generation for one unowned Session.
+   * The stable lock file remains as the cross-process exclusion inode; it
+   * contains no Session data and lets a later create reuse the id safely.
+   * @param id - stored Session identity.
+   * @param options - optional cancellation before file removal starts.
+   */
+  override async delete(id: SessionId, options?: SessionPersistenceDeleteOptions): Promise<void> {
+    options?.signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    options?.signal?.throwIfAborted()
+    this.tracker.claimWrite(id)
+    let lease: SessionWriteLease | undefined
+    let operationFailure: unknown
+    let releaseFailure: unknown
+    try {
+      const selected = await this.findLog(id, options?.signal)
+      if (selected === undefined) throw new SessionPersistenceNotFoundError(id)
+      const dir = dirname(selected.currentPath)
+      lease = await this.acquireLease(id, undefined, dir)
+      options?.signal?.throwIfAborted()
+      this.cancelMigrationPreparation(id)
+      const entries = await readdir(dir, { withFileTypes: true })
+      options?.signal?.throwIfAborted()
+      for (const entry of entries) {
+        if (entry.name === LEASE_FILENAME) continue
+        const path = join(dir, entry.name)
+        if (entry.isSymbolicLink()) {
+          await unlink(path)
+          continue
+        }
+        const identity = await lstat(path)
+        if (identity.isSymbolicLink()) await unlink(path)
+        else await rm(path, { recursive: identity.isDirectory(), force: true })
+      }
+      this.coldLogMemo.delete(id)
+    } catch (error: unknown) {
+      operationFailure = error
+    } finally {
+      try {
+        await lease?.release()
+      } catch (error: unknown) {
+        releaseFailure = error
+      }
+      this.tracker.releaseClaim(id)
+    }
+    if (operationFailure !== undefined && releaseFailure !== undefined) {
+      throw new AggregateError(
+        [operationFailure, releaseFailure],
+        `failed to delete session "${id}" and release its storage lease`,
+      )
+    }
+    if (operationFailure !== undefined) throw operationFailure
+    if (releaseFailure !== undefined) throw releaseFailure
+  }
+
   // --- handle-facing storage internals (package-private via the handle class below) ---
 
   /** Resolve and read one stored log, refusing loudly when the artifact is absent. */
@@ -555,6 +611,14 @@ class JsonlSessionPersistence extends SessionPersistence {
       fileRevision(current.identity),
       signal,
     )
+  }
+
+  /** Abort and forget one in-flight historical-generation preparation. */
+  private cancelMigrationPreparation(id: SessionId): void {
+    const preparation = this.migrationPreparations.get(id)
+    if (preparation === undefined) return
+    preparation.controller.abort(new Error(`session "${id}" was deleted`))
+    this.migrationPreparations.delete(id)
   }
 
   /** Probe the memo and otherwise decode one historical generation under backend cancellation. */

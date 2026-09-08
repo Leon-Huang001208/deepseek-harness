@@ -205,6 +205,34 @@ async function liveContext(config: ConstructorParameters<typeof SqliteSessionQue
 }
 
 describe('SQLite session search', () => {
+  it('forgets persisted derived rows immediately and invalidates existing cursors', async () => {
+    const path = await temporaryPath()
+    const ctx = await liveContext({ path })
+    TestPersistence.reset([
+      { meta: header('forget-index', 2), events: messageEvents('target') },
+      { meta: header('keep-index', 1), events: messageEvents('target') },
+    ])
+    await ctx.plugin(TestPersistence)
+    const first = await ctx.sessionQuery.searchSessions({ query: 'target', limit: 1 })
+    expect(first.items).toHaveLength(1)
+    expect(first.nextCursor).toBeDefined()
+    if (first.nextCursor === undefined) throw new Error('expected cursor')
+    TestPersistence.entries.delete(SessionId('forget-index'))
+
+    await ctx.sessionQuery.forgetSession(SessionId('forget-index'))
+
+    const db = new DatabaseSync(path)
+    try {
+      expect(db.prepare('SELECT id FROM persisted_sessions WHERE id = ?').get('forget-index'))
+        .toBeUndefined()
+    } finally {
+      db.close()
+    }
+    await expect(ctx.sessionQuery.searchSessions({ query: 'target', limit: 1, cursor: first.nextCursor }))
+      .rejects.toMatchObject({ code: 'SESSION_QUERY_STALE_CURSOR' })
+    await ctx.fiber.dispose()
+  })
+
   it('defaults and validates opening policy and persisted inspection concurrency through its Cordis config', async () => {
     const defaultCtx = await liveContext()
     expect((defaultCtx.sessionQuery as SqliteSessionQueryEngine).config.openAt).toBe('startup')

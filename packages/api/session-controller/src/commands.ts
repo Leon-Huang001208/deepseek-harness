@@ -250,7 +250,7 @@ export class SessionCommandController {
     const composition = await this.agents.composeAgent(this.agents.presetForObservation(source))
     try {
       const { provider, model } = this.ctx.agentDefaultModel.currentSelection()
-      await this.ctx.agents.create({
+      await this.agents.createOwned({
         sessionId: childId,
         seed: source.events.slice(0, cut),
         inheritedEventCount: cut,

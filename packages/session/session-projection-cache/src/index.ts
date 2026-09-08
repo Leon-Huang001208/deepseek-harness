@@ -262,6 +262,16 @@ export class SessionProjectionCache extends Service {
   }
 
   /**
+   * Permanently remove one session's derived checkpoint. The caller must
+   * quiesce live owners first so a later detach cannot recreate the record.
+   * @param id - session identity whose checkpoint must be removed.
+   * @returns whether a stored checkpoint existed.
+   */
+  delete(id: SessionId): Promise<boolean> {
+    return this.requireTable().delete(id)
+  }
+
+  /**
    * Cold-read one session's projections from its complete log. Each unit is
    * seeded from the identity-checked cached rows — the registry skips `apply`
    * for the already-folded prefix (events at or below the row's `seq`) — and

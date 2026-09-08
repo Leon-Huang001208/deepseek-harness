@@ -150,6 +150,11 @@ export class FakeApiClient {
   onOpenWorkspacePath: (payload: unknown) => Promise<RemoteResult<{ opened: true }>> =
     () => Promise.resolve(ok({ opened: true as const }))
 
+  onDelete: (payload: unknown) => Promise<RemoteResult<{ deletedSessionIds: SessionId[] }>> =
+    payload => Promise.resolve(ok({
+      deletedSessionIds: [(payload as { sessionId: SessionId }).sessionId],
+    }))
+
   private readonly followConns = new Map<SessionId, ValueStreamConn<SessionFollowFrame>[]>()
   private readonly controlConns: ValueStreamConn<SessionControlFrame>[] = []
   private readonly workspaceConns: ValueStreamConn<WorkspaceFollowFrame>[] = []
@@ -227,6 +232,7 @@ export class FakeApiClient {
           this.onSelectModel(payload),
         ),
         rename: payload => this.record('session.rename', payload, this.onRename(payload)),
+        delete: payload => this.record('session.delete', payload, this.onDelete(payload)),
         fork: payload => this.record('session.fork', payload, this.onFork(payload)),
         prompt: payload => this.record('session.prompt', payload, this.onPrompt(payload)),
         attachment: payload => this.record('session.attachment', payload, this.onAttachment(payload)),
