@@ -85,6 +85,10 @@ kind: "package-reference"
 
 历史格式的 `stat` 与 `list` 修订号需要与根目录 Session 数量成正比的元数据工作。首次正文准备扫描所有所选 header 并解码直属子正文；复用准备缓存仍扫描成员集合并检查修订。只读访问从不发布升级，因此冷进程与被淘汰的准备缓存会重复这些工作。当前 V4 正文读取和修订号避开历史全库扫描。见[实测成本与诊断命令](../../../.agents/notes/implemented/architecture/2026-08-31-released-session-format-migrations.zh.md#catalog-scan-measurements)。
 
+### 永久删除
+
+`delete(id)` 获取与写 open 相同的进程内写入者认领和跨进程租约，然后移除 Session 目录中的每个 generation 与临时产物。它保留不包含 Session 数据的稳定 `session.lock` inode，使后续 create 可以安全复用 id 而不破坏跨进程排他。存在活动写入者时拒绝删除，Session 不存在时抛出 `SessionPersistenceNotFoundError`，物理删除开始前均响应取消。
+
 -----
 
 <a id="understand-the-implementation"></a>
@@ -157,7 +161,6 @@ JSONL 存储不修改实时请求前缀。只有重建历史、当前 envelope �
 - **格式迁移保留已配置编码，且只支持 catalog 中的链**——本 build 把受支持的历史代迁移到当前格式；更改压缩需要独立根，保留的旧版本不提供自动 fallback 或 downgrade 支持。
 - **平铺文件存储布局不加载**——加载前使用独立根，或将预发布产物移入项目/会话目录布局。
 - **压缩文件不能直接按行读取**——使用后端加载；或在写入新根前选择 `compression: 'none'`，供外部行读取方使用。
-- **不删除会话文件**——日志在 `root` 下累积，直到外部移除；seam 无删除接口。
 - **每会话一个活动写入方**——写句柄认领在所属后端实例内排除第二个写入方，内核锁（`session.lock` 上的非阻塞 `flock(2)`；Windows 上为由该路径派生的命名内核信号量，零文件系统足迹）排除其他所有实例与进程；锁在以写模式打开既有产物时立即获取，新建会话则仅在首次实体化写入之前获取，因此未实体化的会话不留任何文件系统足迹。崩溃持有者的锁随其进程消亡，会话立即可再写入，而活着但卡死的持有者会阻塞写入方直到其进程退出（POSIX 上删除锁文件即放弃该排他；释放本身从不删除它）。咨询式 `flock` 在部分网络文件系统（NFSv3）上不可靠，Windows 信号量名按登录会话隔离。
 - **POSIX 实体化需要硬链接支持**——第一次 append 使用 `link()`，使同 id 竞态失败而不覆盖已提交日志；Windows 使用无替换 write-through rename。
 - **POSIX 写入需要匹配的预编译系统 addon**——[`node-addon-system`](../../../native/system/README.zh.md) 提供异步 flock，无须在用户侧编译。addon 缺失时拒绝写入所有权；Windows 保留其信号量实现。

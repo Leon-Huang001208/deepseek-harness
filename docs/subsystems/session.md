@@ -876,6 +876,16 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 @Remote('rename') rename(request: SessionRenameRequest): Promise<SessionRenameValue>
 
 /**
+ * Permanently delete one ordinary Session and every descendant after all
+ * live owners reach quiescence. Derived owners are cleaned deepest-first
+ * before each authoritative log is removed.
+ * @param request - ordinary root Session identity.
+ * @param signal - Remote request cancellation before destructive commits.
+ * @returns stable deepest-first identities removed by the cascade.
+ */
+@Remote('delete') async delete(request: SessionDeleteRequest, signal: AbortSignal): Promise<SessionDeleteValue>
+
+/**
  * Fork one cold-readable exact event prefix into a new Session. An omitted
  * boundary selects the latest completed-turn prefix; an open cut receives
  * synthetic fork closers.

@@ -248,6 +248,71 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
       }
     })
 
+    it('permanently deletes a closed materialized session and reports a repeated delete as not found', async () => {
+      const backend = await make()
+      try {
+        const m = meta('delete-materialized', '/work')
+        const writer = await backend.persistence.create(m)
+        await writer.append(oneTurnLog())
+        await writer.close()
+
+        await backend.persistence.delete(m.id)
+
+        expect(await backend.persistence.stat(m.id)).toBeUndefined()
+        expect((await backend.persistence.list()).map(item => item.header.id)).not.toContain(m.id)
+        await expect(backend.persistence.open(m.id, 'read'))
+          .rejects.toBeInstanceOf(SessionPersistenceNotFoundError)
+        await expect(backend.persistence.delete(m.id))
+          .rejects.toBeInstanceOf(SessionPersistenceNotFoundError)
+
+        if (backend.reopen !== undefined) {
+          const reopened = await backend.reopen()
+          try {
+            expect(await reopened.persistence.stat(m.id)).toBeUndefined()
+            expect((await reopened.persistence.list()).map(item => item.header.id)).not.toContain(m.id)
+          } finally {
+            await reopened.dispose()
+          }
+        }
+      } finally {
+        await backend.dispose()
+      }
+    })
+
+    it('refuses permanent deletion while the session has an active writer', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const m = meta('delete-owned', '/work')
+        const writer = await persistence.create(m)
+        await writer.append(oneTurnLog())
+
+        await expect(persistence.delete(m.id)).rejects.toBeInstanceOf(SessionAlreadyOwnedError)
+        expect(await persistence.stat(m.id)).toBeDefined()
+
+        await writer.close()
+      } finally {
+        await dispose()
+      }
+    })
+
+    it('honors cancellation before permanent deletion starts', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const m = meta('delete-cancelled', '/work')
+        const writer = await persistence.create(m)
+        await writer.append(oneTurnLog())
+        await writer.close()
+        const controller = new AbortController()
+        const reason = new Error('cancel deletion')
+        controller.abort(reason)
+
+        await expect(persistence.delete(m.id, { signal: controller.signal })).rejects.toBe(reason)
+        expect(await persistence.stat(m.id)).toBeDefined()
+      } finally {
+        await dispose()
+      }
+    })
+
     it('write ownership is single-holder per instance and released by close', async () => {
       const { persistence, dispose } = await make()
       try {

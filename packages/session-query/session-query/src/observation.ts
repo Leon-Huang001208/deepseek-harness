@@ -89,6 +89,14 @@ export class SessionObservationReader {
   ) {}
 
   /**
+   * Drop the reusable cold observation for an identity entering deletion.
+   * @param sessionId - logical Session identity being deleted.
+   */
+  forget(sessionId: SessionId): void {
+    this.cache.delete(sessionId)
+  }
+
+  /**
    * Observe one live-preferred Session and retain a cold preparation until disposal.
    * @param sessionId - logical Session identity.
    * @param options - cancellation and all-or-none projection computation for this read.

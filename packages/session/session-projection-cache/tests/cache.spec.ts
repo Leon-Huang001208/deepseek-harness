@@ -211,6 +211,20 @@ afterEach(async () => {
 })
 
 describe('SessionProjectionCache write policy', () => {
+  it('permanently removes a stored checkpoint', async () => {
+    const { ctx, root, cache } = await harness()
+    const session = ctx.sessions.create(SessionId('delete-checkpoint'))
+    mark(session, ['stored'])
+    endTurn(session)
+    await vi.waitFor(async () => {
+      expect(await storedRecord(root, session.id)).toBeDefined()
+    }, { timeout: 5_000 })
+
+    await expect((cache as unknown as { delete(id: SessionId): Promise<boolean> }).delete(session.id))
+      .resolves.toBe(true)
+    expect(await storedRecord(root, session.id)).toBeUndefined()
+  })
+
   it('writes a durable checkpoint at turn/end (mandatory point)', async () => {
     const { ctx, root } = await harness()
     // The interval cannot substitute for the mandatory turn/end trigger.

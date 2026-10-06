@@ -77,6 +77,7 @@ export interface TestSessionRemote {
   selectModel(request: SessionSelectModelRequest): Promise<RemoteResult<SessionSelectModelValue>>
   modelCatalog(): Promise<RemoteResult<ModelCatalog>>
   rename(request: SessionRenameRequest): Promise<RemoteResult<SessionRenameValue>>
+  delete(request: { readonly sessionId: SessionId }): Promise<RemoteResult<{ readonly deletedSessionIds: readonly SessionId[] }>>
   fork(request: SessionForkRequest): Promise<RemoteResult<SessionForkValue>>
   prompt(request: SessionPromptRequest, signal?: AbortSignal): Promise<RemoteResult<SessionPromptValue>>
   attachment(request: SessionAttachmentRequest): Promise<RemoteResult<SessionAttachmentValue>>
@@ -363,6 +364,15 @@ export function createSessionTestRemote(
     selectModel: request => remoteResult(() => direct.selectModel(request)),
     modelCatalog: () => remoteResult(() => direct.modelCatalog()),
     rename: request => remoteResult(() => direct.rename(request)),
+    delete: (request) => {
+      const signal = new AbortController().signal
+      return remoteResult(() => (direct as unknown as {
+        delete(
+          value: { readonly sessionId: SessionId },
+          signal: AbortSignal,
+        ): Promise<{ readonly deletedSessionIds: readonly SessionId[] }>
+      }).delete(request, signal), signal)
+    },
     fork: request => remoteResult(() => direct.fork(request)),
     prompt: (request, signal = new AbortController().signal) => remoteResult(
       () => direct.prompt(request, signal),

@@ -12,6 +12,8 @@ import { canOpenNativePath, nativeFileManager, nativeFileApplications, openNativ
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
+import type { SessionHeader } from '@deepseek-ai/dsh-session'
+import { SessionAlreadyOwnedError, SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   ApiSessionAgentController,
@@ -38,6 +40,8 @@ import type {
   SessionControlFrame,
   SessionCreateRequest,
   SessionCreateValue,
+  SessionDeleteRequest,
+  SessionDeleteValue,
   SessionFollowFrame,
   SessionFollowRequest,
   SessionForkRequest,
@@ -110,6 +114,7 @@ export class SessionController extends TypertRemoteService {
     'fs',
     'llm',
     'sessions',
+    'sessionPersistence',
     'sessionProjections',
     'sessionQuery',
     'typert',
@@ -409,6 +414,87 @@ export class SessionController extends TypertRemoteService {
   @Remote('rename')
   rename(request: SessionRenameRequest): Promise<SessionRenameValue> {
     return this.commands.rename(request)
+  }
+
+  /**
+   * Permanently delete one ordinary Session and every descendant after all
+   * live owners reach quiescence. Derived owners are cleaned deepest-first
+   * before each authoritative log is removed.
+   * @param request - ordinary root Session identity.
+   * @param signal - Remote request cancellation before destructive commits.
+   * @returns stable deepest-first identities removed by the cascade.
+   */
+  @Remote('delete')
+  async delete(request: SessionDeleteRequest, signal: AbortSignal): Promise<SessionDeleteValue> {
+    signal.throwIfAborted()
+    const headers = new Map<SessionId, SessionHeader>()
+    for (const snapshot of await this.ctx.sessionPersistence.list({ signal })) {
+      headers.set(snapshot.header.id, snapshot.header)
+    }
+    for (const session of this.ctx.sessions.list()) headers.set(session.id, session.header)
+
+    const root = headers.get(request.sessionId)
+    if (root === undefined) {
+      throw new RemoteError('session/not-found', `session "${request.sessionId}" not found`, {
+        sessionId: request.sessionId,
+      })
+    }
+    if (root.origin === 'subagent') {
+      throw new RemoteError(
+        'session/delete-blocked',
+        `session "${request.sessionId}" is a subagent session; delete its ordinary ancestor instead`,
+        { sessionId: request.sessionId, reason: 'subagent sessions cannot be deleted directly' },
+      )
+    }
+
+    const descendants = new Set<SessionId>()
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const header of headers.values()) {
+        const parent = header.parentSession
+        if (parent === undefined || (parent !== request.sessionId && !descendants.has(parent))) continue
+        if (descendants.has(header.id)) continue
+        descendants.add(header.id)
+        changed = true
+      }
+    }
+    const depth = (sessionId: SessionId): number => {
+      let current = headers.get(sessionId)?.parentSession
+      let value = 0
+      const seen = new Set<SessionId>()
+      while (current !== undefined && !seen.has(current)) {
+        seen.add(current)
+        value += 1
+        current = headers.get(current)?.parentSession
+      }
+      return value
+    }
+    const targets = [request.sessionId, ...descendants]
+      .sort((left, right) => depth(right) - depth(left) || String(left).localeCompare(String(right)))
+
+    this.agents.assertDeletable(targets)
+    await this.agents.releaseForDeletion(targets)
+    try {
+      for (const sessionId of targets) {
+        signal.throwIfAborted()
+        await this.ctx.sessionQuery.forgetSession(sessionId, signal)
+        await this.ctx.get('sessionProjectionCache')?.delete(sessionId)
+        await this.ctx.workspaceRegistry.forgetSession(sessionId)
+        await this.ctx.sessionPersistence.delete(sessionId, { signal })
+      }
+    } catch (error: unknown) {
+      if (error instanceof SessionPersistenceNotFoundError) {
+        throw new RemoteError('session/not-found', error.message, { sessionId: error.sessionId })
+      }
+      if (error instanceof SessionAlreadyOwnedError) {
+        throw new RemoteError('session/agent-busy', error.message, {
+          reason: 'session persistence is still owned',
+        })
+      }
+      throw error
+    }
+    return { deletedSessionIds: targets }
   }
 
   /**

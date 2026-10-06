@@ -404,6 +404,15 @@ abstract searchSessions( request: SessionSearchRequest, exec?: SessionSearchExec
 abstract searchEvents( request: SessionEventSearchRequest, exec?: SessionSearchExecContext, ): Promise<SessionEventSearchPage>
 
 /**
+ * Remove provider-owned derived state for a permanently deleted session.
+ * The shared prepared-observation cache is invalidated before the provider
+ * hook runs; authoritative content remains the persistence owner's concern.
+ * @param sessionId - session identity whose derived state must be forgotten.
+ * @param signal - optional cancellation before a provider commit.
+ */
+async forgetSession(sessionId: SessionId, signal?: AbortSignal): Promise<void>
+
+/**
  * List the complete logical corpus using live-preferred records.
  * @param signal - optional cancellation for persistence listing.
  * @returns deterministic newest-first cloned session records.

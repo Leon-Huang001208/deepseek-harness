@@ -408,6 +408,18 @@ abstract stat(id: SessionId, options?: SessionPersistenceStatOptions): Promise<S
  * @returns one snapshot per stored session.
  */
 abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+/**
+ * Permanently delete one stored session after proving that no writer owns it.
+ * Once physical deletion begins, cancellation no longer interrupts the
+ * operation so callers never observe an ambiguous partial result.
+ * @param _id - the stored session to delete.
+ * @param options - optional cancellation before the destructive commit.
+ * @returns resolution after the durable session records are absent.
+ * @throws {SessionPersistenceNotFoundError} when the session does not exist.
+ * @throws {SessionAlreadyOwnedError} while a writer owns the session.
+ */
+delete(_id: SessionId, options?: SessionPersistenceDeleteOptions): Promise<void>
 ```
 
 Types: [SessionId](core.md)

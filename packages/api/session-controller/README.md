@@ -58,6 +58,8 @@ The user-invocable `skills/list` metadata includes the winning provider’s opti
 
 Fork copies the exact inclusive event prefix selected by `atSeq`, including a cut inside an open turn. The child records its inherited marker before synthetic fork results and closing events. Omitting `atSeq` selects the latest completed turn and its standalone tail, stopping before the next turn or queued input; a nonexistent event is rejected. The chat action selects a completed turn.
 
+`session/delete` permanently removes an ordinary Session and all descendants in deepest-first order. It refuses a direct subagent target, a running Agent, and any live identity owned outside this controller; an idle controller-owned Agent is released before deletion. Query indexes, projection-cache rows, and Workspace references are removed before each durable log, while the root log is removed last so a failed cascade can be retried through the same root identity. A repeated completed deletion returns `session/not-found`.
+
 A resume blocked by an existing write handle returns `session/writer-held` with the Session id; other resume failures retain `gateway/internal`.
 
 `loadThrough(seq)` retains older pages privately until its shared target is covered or loading ends, then publishes the successful pages as one ordered prepend. Live events remain visible while history loads. A later page failure retains the successful prefix; replacing the history window discards buffered pages from the replaced window. Ordinary `loadOlder()` publishes one Host-selected page directly.

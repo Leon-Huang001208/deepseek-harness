@@ -58,6 +58,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用�
 
 Fork 复制 `atSeq` 所选的精确事件前缀，包含切点事件，允许在开放轮次内截取。子会话在合成的 fork 结果和结束事件之前记录继承标记。省略 `atSeq` 时选择最近已结束轮次及其独立尾部，在下一轮次或排队输入之前停止；不存在的事件会被拒绝。聊天操作选择已结束轮次。
 
+`session/delete` 按最深后代优先的顺序永久移除一个普通 Session 及其全部后代。它拒绝直接指定 subagent、正在运行的 Agent，以及由本 controller 之外持有的任何 live identity；由 controller 持有的空闲 Agent 会先释放再删除。每份持久日志删除前，查询索引、projection cache row 与 Workspace 引用会先移除；根日志最后删除，因此级联中途失败后仍可用同一根 identity 重试。已完成的删除再次调用时返回 `session/not-found`。
+
 恢复会话时若已有写句柄占用，返回 `session/writer-held`，并携带会话 id；其他恢复失败仍返回 `gateway/internal`。
 
 `loadThrough(seq)` 在共享目标被覆盖或加载结束前私下保留较早页面，随后把成功取得的页面按顺序作为一次前插发布。历史加载期间实时事件仍然可见。后续页面失败时保留已成功取得的部分；历史窗口被替换时丢弃被替换窗口的暂存页面。普通 `loadOlder()` 直接发布 Host 选取的一页结果。

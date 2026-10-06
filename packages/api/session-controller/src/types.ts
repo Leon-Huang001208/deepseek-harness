@@ -224,6 +224,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'session/steer-unavailable': { readonly itemId: MessageId }
     'session/title-invalid': { readonly sessionId: SessionId }
     'session/fork-unavailable': { readonly sessionId: SessionId }
+    'session/delete-blocked': { readonly sessionId: SessionId; readonly reason: string }
     'subagent/not-found': {
       readonly parentSessionId: SessionId
       readonly childSessionId: SessionId
@@ -315,6 +316,16 @@ export interface SessionRenameRequest {
 export interface SessionRenameValue {
   readonly title: string
   readonly seq: number
+}
+
+/** Permanent deletion request for one ordinary root Session. */
+export interface SessionDeleteRequest {
+  readonly sessionId: SessionId
+}
+
+/** Stable deepest-first identities removed by one cascade. */
+export interface SessionDeleteValue {
+  readonly deletedSessionIds: readonly SessionId[]
 }
 
 /** Session fork request. */
