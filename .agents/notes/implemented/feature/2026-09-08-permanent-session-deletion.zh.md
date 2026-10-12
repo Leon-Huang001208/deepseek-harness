@@ -40,4 +40,4 @@ Session Controller 发布 `session/delete`，用于永久删除一个普通 Sess
 
 ## Testing
 
-可复用 persistence contract 覆盖已关闭会话删除、重复不存在、写入者所有权、提交前取消与新实例可见性。JSONL 测试覆盖原始文本和 Zstandard 根以及跨进程租约。Session Controller 测试覆盖确定性的后代顺序、派生清理、直接 child 拒绝、运行中与外部持有 live 拒绝、controller 自有空闲 Agent 销毁、重复删除，以及预检失败时零变更。Query、projection cache 与 Workspace 测试分别钉住各自的 forget 操作。
+可复用 persistence contract 覆盖已关闭会话删除、重复不存在、写入者所有权、提交前取消与新实例可见性。JSONL 测试覆盖原始文本和 Zstandard 根以及跨进程租约。Session Controller 测试覆盖确定性的后代顺序、派生清理、直接 child 拒绝、运行中与外部持有 live 拒绝、controller 自有空闲 Agent 销毁、重复删除，以及预检失败时零变更。Query、projection cache 与 Workspace 测试分别钉住各自的 forget 操作。 删除也覆盖新 generation 发布前后的历史 generation 与迁移临时产物。
