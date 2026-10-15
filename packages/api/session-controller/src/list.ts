@@ -17,7 +17,7 @@ import {
 } from './types.ts'
 import type {
   SessionListMetadata, SessionProjectionHints, SessionProjectionValues, SessionSearchItem,
-  SessionSearchValue, SessionSummary,
+  SessionSearchValue, SessionSummary, SessionSearchRequest,
 } from './types.ts'
 
 const SEARCH_PROVIDER_CALL_LIMIT = 100
@@ -182,10 +182,21 @@ export class ApiSessionList {
    * Search current visible message content without activating any matching Session.
    * @param query - literal message-content query.
    * @param signal - cancellation for list and search reads.
+   * @param options - optional caller-owned scope and explicit incomplete-search policy.
    * @returns authorized bounded Session search results.
    */
-  async search(query: string, signal: AbortSignal): Promise<SessionSearchValue> {
+  async search(query: string, signal: AbortSignal, options: Omit<SessionSearchRequest, 'query'> = {}): Promise<SessionSearchValue> {
     const normalizedQuery = normalizeSearchQuery(query)
+    const policy: unknown = options.unsupportedSessionPolicy
+    if (policy !== undefined && policy !== 'fail' && policy !== 'report') {
+      throw new RemoteError('gateway/bad-request', 'unsupportedSessionPolicy must be fail or report', {})
+    }
+    if (options.sessionIds !== undefined && (!Array.isArray(options.sessionIds) || options.sessionIds.length > 10_000
+      || options.sessionIds.some(id => typeof id !== 'string' || id.length < 1 || id.length > 255 || id.includes('\0')))) {
+      throw new RemoteError('gateway/bad-request', 'sessionIds must contain at most 10000 bounded text ids', {})
+    }
+    const report = options.unsupportedSessionPolicy === 'report'
+    const requestedIds = options.sessionIds === undefined ? undefined : new Set(options.sessionIds)
     signal.throwIfAborted()
     const provider = this.ctx.get('sessionQuery')
     if (provider === undefined) {
@@ -199,15 +210,16 @@ export class ApiSessionList {
       const visible = await provider.listSessions(signal)
       signal.throwIfAborted()
       const visibleIds = new Set(visible
-        .filter(record => record.header.cwd !== undefined)
+        .filter(record => record.header.cwd !== undefined && (requestedIds === undefined || requestedIds.has(record.header.id)))
         .map(record => record.header.id))
-      if (visibleIds.size === 0) return { items: [], hasMore: false }
+      if (visibleIds.size === 0) return { items: [], hasMore: false, ...(report ? { coverage: { unavailableSessionCount: 0 } } : {}) }
       const authorized: SessionSearchItem[] = []
       const acceptedIds = new Set<SessionId>()
       const seenCursors = new Set<SessionSearchCursor>()
       let cursor: SessionSearchCursor | undefined
       let providerCalls = 0
       let pageLimit = SESSION_SEARCH_RESULT_LIMIT
+      let unavailableSessionCount = 0
       while (authorized.length <= SESSION_SEARCH_RESULT_LIMIT) {
         signal.throwIfAborted()
         if (providerCalls >= SEARCH_PROVIDER_CALL_LIMIT) {
@@ -220,6 +232,8 @@ export class ApiSessionList {
         try {
           page = await provider.searchSessions({
             query: normalizedQuery,
+            ...((report || requestedIds !== undefined) ? { sessionFilters: [{ kind: 'id' as const, values: [...visibleIds] }] } : {}),
+            ...(report ? { unsupportedSessionPolicy: 'report' as const } : {}),
             eventFilters: [
               { kind: 'type', values: ['user/message', 'assistant/message'] },
               { kind: 'surface', values: ['current'] },
@@ -251,6 +265,20 @@ export class ApiSessionList {
         if (page.items.length > requestedLimit) {
           throw new Error(`session search provider returned ${String(page.items.length)} items; maximum is ${String(requestedLimit)}`)
         }
+        if (report) {
+          const count = page.unavailableSessionCount
+          const unavailable: unknown = page.unavailableSessions
+          const visibleTexts = new Set<string>(visibleIds)
+          if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 || count > visibleIds.size
+            || !Array.isArray(unavailable) || unavailable.length > requestedLimit
+            || unavailable.length > count
+            || unavailable.some((entry: unknown) => !entry || typeof entry !== 'object'
+              || !('sessionId' in entry) || typeof entry.sessionId !== 'string' || !visibleTexts.has(entry.sessionId)
+              || !('reason' in entry) || entry.reason !== 'unsupported-format')) {
+            throw new Error('session search provider returned invalid incomplete coverage')
+          }
+          unavailableSessionCount = count
+        }
         for (const hit of page.items) {
           if (authorized.length > SESSION_SEARCH_RESULT_LIMIT) continue
           if (!visibleIds.has(hit.header.id)
@@ -276,6 +304,7 @@ export class ApiSessionList {
       return {
         items: authorized.slice(0, SESSION_SEARCH_RESULT_LIMIT),
         hasMore: authorized.length > SESSION_SEARCH_RESULT_LIMIT,
+        ...(report ? { coverage: { unavailableSessionCount } } : {}),
       }
     } catch (error: unknown) {
       signal.throwIfAborted()

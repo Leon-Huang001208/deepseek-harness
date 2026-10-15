@@ -273,7 +273,7 @@ export class SessionController extends TypertRemoteService {
    */
   @Remote('search')
   search(request: SessionSearchRequest, signal: AbortSignal): Promise<SessionSearchValue> {
-    return this.listState.search(request.query, signal)
+    return this.listState.search(request.query, signal, request)
   }
 
   /**

@@ -94,6 +94,44 @@ function installSearchQuery(
 }
 
 describe('session.search', () => {
+  it('scopes explicit partial searches before counting unsupported histories', async () => {
+    const ctx = await baseContext()
+    ctx.sessions.create(sid('owned'), { meta: header('owned') })
+    ctx.sessions.create(sid('unrelated'), { meta: header('unrelated') })
+    const searchSessions = vi.fn(async (query: SessionSearchRequest) => {
+      expect(query.sessionFilters).toEqual([{ kind: 'id', values: [sid('owned')] }])
+      expect(query.unsupportedSessionPolicy).toBe('report')
+      return { items: [], unavailableSessions: [{ sessionId: sid('owned'), reason: 'unsupported-format' }], unavailableSessionCount: 1 }
+    })
+    installSearchQuery(ctx, searchSessions)
+    try {
+      const response = await createSessionTestRemote(ctx, defaults).search({
+        query: 'needle', sessionIds: [sid('owned'), sid('unknown')], unsupportedSessionPolicy: 'report',
+      }, new AbortController().signal)
+      expect(response).toMatchObject({ ok: true, value: { items: [], hasMore: false, coverage: { unavailableSessionCount: 1 } } })
+      const empty = await new ApiSessionList(ctx, 8).search('needle', new AbortController().signal, {
+        sessionIds: [], unsupportedSessionPolicy: 'report',
+      })
+      expect(empty).toEqual({ items: [], hasMore: false, coverage: { unavailableSessionCount: 0 } })
+      expect(searchSessions).toHaveBeenCalledOnce()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('rejects missing partial coverage and malformed scope without silently accepting complete results', async () => {
+    const ctx = await baseContext()
+    ctx.sessions.create(sid('owned'), { meta: header('owned') })
+    installSearchQuery(ctx, async () => ({ items: [] }))
+    const list = new ApiSessionList(ctx, 8)
+    try {
+      await expect(list.search('needle', new AbortController().signal, { unsupportedSessionPolicy: 'report' }))
+        .rejects.toMatchObject({ code: 'gateway/internal' })
+      await expect(list.search('needle', new AbortController().signal, { sessionIds: ['' as SessionId] }))
+        .rejects.toMatchObject({ code: 'gateway/bad-request' })
+      await expect(list.search('needle', new AbortController().signal, { unsupportedSessionPolicy: 'ignore' as never }))
+        .rejects.toMatchObject({ code: 'gateway/bad-request' })
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('rejects search when the query service is absent', async () => {
     const ctx = await baseContext()
     const list = new ApiSessionList(ctx, 8)
