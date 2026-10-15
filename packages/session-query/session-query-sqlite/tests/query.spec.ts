@@ -27,6 +27,7 @@ describe('SQLite search request normalization', () => {
   it('normalizes both scopes, defaults arrays and limits, and preserves cursors', () => {
     expect(normalizeSessionRequest({ query: '  alpha\n beta  ' }, limits)).toEqual({
       query: 'alpha beta',
+      unsupportedSessionPolicy: 'fail',
       sessionFilters: [],
       eventFilters: [],
       limit: 2,
@@ -39,6 +40,7 @@ describe('SQLite search request normalization', () => {
       cursor: SessionSearchCursor('next'),
     }, limits)).toEqual({
       query: 'needle',
+      unsupportedSessionPolicy: 'fail',
       sessionFilters: [{ kind: 'availability', values: ['live'] }],
       eventFilters: [{ kind: 'surface', values: ['current'] }],
       limit: 3,
@@ -65,6 +67,8 @@ describe('SQLite search request normalization', () => {
   })
 
   it('rejects non-text, blank, non-integer, non-positive, and oversized requests', () => {
+    expect(() => normalizeSessionRequest({ query: 'needle', unsupportedSessionPolicy: 'ignore' as never }, limits))
+      .toThrow(expectCode('SESSION_QUERY_INVALID_FILTER'))
     expect(() => normalizeSessionRequest({ query: 1 as never }, limits))
       .toThrow(expectCode('SESSION_QUERY_INVALID_QUERY'))
     expect(() => normalizeSessionRequest({ query: ' \n ' }, limits))
@@ -210,6 +214,7 @@ describe('SQLite query identity and presentation', () => {
   it('canonicalizes request and filter ordering in both scopes', () => {
     const sessionA: NormalizedSessionRequest = {
       query: 'needle',
+      unsupportedSessionPolicy: 'fail',
       limit: 2,
       sessionFilters: [
         { kind: 'cwd', values: ['/b', '/a'] },
@@ -221,6 +226,7 @@ describe('SQLite query identity and presentation', () => {
     }
     const sessionB: NormalizedSessionRequest = {
       query: 'needle',
+      unsupportedSessionPolicy: 'fail',
       limit: 2,
       sessionFilters: [
         { kind: 'created-at', from: 1 },

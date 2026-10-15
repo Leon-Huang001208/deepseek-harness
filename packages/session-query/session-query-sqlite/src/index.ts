@@ -11,6 +11,7 @@ import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Session, SessionEvent, SessionHeader, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
+import { SessionFormatUnsupportedError } from '@deepseek-ai/dsh-session-persistence'
 import type {
   SessionPersistenceRevision,
   SessionPersistenceSnapshot,
@@ -24,6 +25,7 @@ import SessionQueryEngine, {
   assertSessionHeadersCompatible,
   buildSessionEventSearchDocuments,
   readColdSessionLog,
+  filterSessionResults,
 } from '@deepseek-ai/dsh-session-query'
 import type {
   Config as SessionQueryConfig,
@@ -152,6 +154,7 @@ interface Observation {
   persistenceBinding: PersistenceBinding
   persisted: Map<SessionId, ObservedPersistedSession>
   live: Map<SessionId, ObservedSession>
+  unavailable: Map<SessionId, ObservedPersistedSession>
 }
 
 interface IndexedPersistedRow {
@@ -234,6 +237,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _persistenceEpoch = 0
   private _globalGeneration = 0
   private _localGeneration = 0
+  private _unavailable = new Map<SessionId, ObservedPersistedSession>()
+  private _unavailableFingerprint = '[]'
   private _tail: Promise<void> = Promise.resolve()
   private _closed = false
   private _closePromise: Promise<void> | undefined
@@ -274,7 +279,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     const signal = exec?.signal
     return this._serialized(signal, async () => {
       await this._ensureReady(signal)
-      const persistenceBinding = await this._reconcile(signal)
+      const persistenceBinding = await this._reconcile(signal, normalized.unsupportedSessionPolicy === 'report')
       assertNotAborted(signal)
       const generation = String(this._globalGeneration)
       const fingerprint = requestFingerprint(normalized)
@@ -282,7 +287,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         ? 0
         : decodeCursor(normalized.cursor, this._instance, 'sessions', fingerprint, generation)
       const rows = this._querySessions(normalized, offset, persistenceBinding)
-      return page(rows, normalized.limit, row => this._sessionHit(row), cursorOffset => encodeCursor({
+      const result = page(rows, normalized.limit, row => this._sessionHit(row), cursorOffset => encodeCursor({
         version: 1,
         instance: this._instance,
         scope: 'sessions',
@@ -290,6 +295,16 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         generation,
         offset: cursorOffset,
       }), offset)
+      if (normalized.unsupportedSessionPolicy === 'report') {
+        const unavailable = filterSessionResults(
+          [...this._unavailable.values()].map(entry => ({ header: entry.header, live: false, persisted: true })),
+          normalized.sessionFilters,
+        ).sort((a, b) => a.header.id.localeCompare(b.header.id))
+        result.unavailableSessionCount = unavailable.length
+        result.unavailableSessions = unavailable.slice(0, normalized.limit)
+          .map(entry => ({ sessionId: entry.header.id, reason: 'unsupported-format' }))
+      }
+      return result
     })
   }
 
@@ -438,7 +453,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     }
   }
 
-  private async _reconcile(signal: AbortSignal | undefined): Promise<PersistenceBinding> {
+  private async _reconcile(signal: AbortSignal | undefined, reportUnsupported = false): Promise<PersistenceBinding> {
     assertNotAborted(signal)
     const db = this._requireDb()
     const persistedRows = db.prepare(
@@ -449,7 +464,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     ).all() as unknown as IndexedLiveRow[]
     const persistedById = new Map(persistedRows.map(row => [row.id as SessionId, row]))
     const liveById = new Map(liveRows.map(row => [row.id as SessionId, row]))
-    const observation = await this._observeStable(persistedById, signal)
+    const observation = await this._observeStable(persistedById, signal, reportUnsupported)
     assertNotAborted(signal)
     const persistentChanges = observation.persistenceBinding.service === undefined
       ? []
@@ -519,7 +534,14 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       }
     }
 
-    if (hasWrites || pointerChanged) this._globalGeneration += 1
+    const unavailableFingerprint = JSON.stringify([...observation.unavailable.values()]
+      .map(entry => [entry.header.id, entry.revision]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
+    if (unavailableFingerprint !== this._unavailableFingerprint && observation.unavailable.size > 0) {
+      this.ctx.logger.warn('session-search: %d unsupported stored sessions excluded; report-mode results are incomplete', observation.unavailable.size)
+    }
+    if (hasWrites || pointerChanged || unavailableFingerprint !== this._unavailableFingerprint) this._globalGeneration += 1
+    this._unavailable = observation.unavailable
+    this._unavailableFingerprint = unavailableFingerprint
     if (pointerChanged) this._persistenceEpoch += 1
     this._localGeneration = nextLocalGeneration
     this._lastPersistenceIdentity = observation.persistenceBinding.identity
@@ -529,6 +551,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private async _observeStable(
     indexed: ReadonlyMap<SessionId, IndexedPersistedRow>,
     signal: AbortSignal | undefined,
+    reportUnsupported: boolean,
   ): Promise<Observation> {
     for (let attempt = 0; attempt < STABLE_OBSERVATION_ATTEMPTS; attempt += 1) {
       assertNotAborted(signal)
@@ -536,6 +559,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       const persistence = persistenceBinding.service
       const initiallyLive = new Set(this.ctx.sessions.list().map(session => session.id))
       let persisted = new Map<SessionId, ObservedPersistedSession>()
+      const unavailable = new Map<SessionId, ObservedPersistedSession>()
       if (persistence !== undefined) {
         try {
           const canReuseIndexed = this._lastPersistenceIdentity === undefined
@@ -553,7 +577,15 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
             // live-preferred.
             if (initiallyLive.has(entry.header.id) || this.ctx.sessions.get(entry.header.id) !== undefined) continue
             assertNotAborted(signal)
-            const loaded = await readColdSessionLog(persistence, entry.header.id, signal)
+            let loaded: Awaited<ReturnType<typeof readColdSessionLog>>
+            try {
+              loaded = await readColdSessionLog(persistence, entry.header.id, signal)
+            } catch (error: unknown) {
+              assertNotAborted(signal)
+              if (!reportUnsupported || !(error instanceof SessionFormatUnsupportedError)) throw error
+              unavailable.set(entry.header.id, entry)
+              continue
+            }
             assertNotAborted(signal)
             assertSessionHeadersCompatible(entry.header, loaded.header)
             entry.loaded = observeSession(loaded.header, loaded.inheritedEventCount, loaded.events)
@@ -564,6 +596,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           const after = materializePersistenceSnapshots(afterSnapshots)
           if (!samePersistenceSnapshots(persisted, after)) continue
           if (this._persistenceBinding !== persistenceBinding) continue
+          for (const id of unavailable.keys()) persisted.delete(id)
         } catch (error: unknown) {
           if (isAbort(error) || signal?.aborted) {
             throw new SessionQueryError('session-search aborted', 'SESSION_QUERY_ABORTED', {
@@ -587,7 +620,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         live.set(session.id, observed)
       }
       if (!sameSessionIds(initiallyLive, live)) continue
-      return { persistenceBinding, persisted, live }
+      return { persistenceBinding, persisted, live, unavailable }
     }
     throw new SessionQueryError(
       'session-search persistence observation did not stabilize after one retry',
