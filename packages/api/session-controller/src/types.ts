@@ -285,7 +285,11 @@ export interface SessionSearchValue {
   readonly items: readonly SessionSearchItem[]
   readonly hasMore: boolean
   /** Present only in report mode, including empty scopes and zero-hit searches. */
-  readonly coverage?: { readonly unavailableSessionCount: number }
+  readonly coverage?: {
+    readonly unavailableSessionCount: number
+    /** Requested ids absent from the list-visible intersection; this does not disclose existence. */
+    readonly unlistedSessionCount: number
+  }
 }
 
 /** Session creation or explicit-id adoption request. */

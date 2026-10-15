@@ -212,7 +212,10 @@ export class ApiSessionList {
       const visibleIds = new Set(visible
         .filter(record => record.header.cwd !== undefined && (requestedIds === undefined || requestedIds.has(record.header.id)))
         .map(record => record.header.id))
-      if (visibleIds.size === 0) return { items: [], hasMore: false, ...(report ? { coverage: { unavailableSessionCount: 0 } } : {}) }
+      const unlistedSessionCount = requestedIds === undefined ? 0 : requestedIds.size - visibleIds.size
+      if (visibleIds.size === 0) {
+        return { items: [], hasMore: false, ...(report ? { coverage: { unavailableSessionCount: 0, unlistedSessionCount } } : {}) }
+      }
       const authorized: SessionSearchItem[] = []
       const acceptedIds = new Set<SessionId>()
       const seenCursors = new Set<SessionSearchCursor>()
@@ -304,7 +307,7 @@ export class ApiSessionList {
       return {
         items: authorized.slice(0, SESSION_SEARCH_RESULT_LIMIT),
         hasMore: authorized.length > SESSION_SEARCH_RESULT_LIMIT,
-        ...(report ? { coverage: { unavailableSessionCount } } : {}),
+        ...(report ? { coverage: { unavailableSessionCount, unlistedSessionCount } } : {}),
       }
     } catch (error: unknown) {
       signal.throwIfAborted()

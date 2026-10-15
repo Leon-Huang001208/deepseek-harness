@@ -108,11 +108,13 @@ describe('session.search', () => {
       const response = await createSessionTestRemote(ctx, defaults).search({
         query: 'needle', sessionIds: [sid('owned'), sid('unknown')], unsupportedSessionPolicy: 'report',
       }, new AbortController().signal)
-      expect(response).toMatchObject({ ok: true, value: { items: [], hasMore: false, coverage: { unavailableSessionCount: 1 } } })
+      expect(response).toMatchObject({
+        ok: true, value: { items: [], hasMore: false, coverage: { unavailableSessionCount: 1, unlistedSessionCount: 1 } },
+      })
       const empty = await new ApiSessionList(ctx, 8).search('needle', new AbortController().signal, {
         sessionIds: [], unsupportedSessionPolicy: 'report',
       })
-      expect(empty).toEqual({ items: [], hasMore: false, coverage: { unavailableSessionCount: 0 } })
+      expect(empty).toEqual({ items: [], hasMore: false, coverage: { unavailableSessionCount: 0, unlistedSessionCount: 0 } })
       expect(searchSessions).toHaveBeenCalledOnce()
     } finally { await ctx.fiber.dispose() }
   })
