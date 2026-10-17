@@ -277,12 +277,22 @@ export interface SessionListValue {
 /** Session search request. */
 export interface SessionSearchRequest {
   readonly query: string
+  /** Optional caller-owned scope, intersected with list-visible ids; at most 10,000 ids of 1–255 UTF-16 units. */
+  readonly sessionIds?: readonly SessionId[]
+  /** Explicitly request incomplete results for unsupported formats; omitted means strict failure. */
+  readonly unsupportedSessionPolicy?: 'fail' | 'report'
 }
 
 /** Session search response value. */
 export interface SessionSearchValue {
   readonly items: readonly SessionSearchItem[]
   readonly hasMore: boolean
+  /** Present only in report mode, including empty scopes and zero-hit searches. */
+  readonly coverage?: {
+    readonly unavailableSessionCount: number
+    /** Requested ids absent from the list-visible intersection; this does not disclose existence. */
+    readonly unlistedSessionCount: number
+  }
 }
 
 /** Session creation or explicit-id adoption request. */

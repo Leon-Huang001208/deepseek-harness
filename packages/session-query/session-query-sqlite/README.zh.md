@@ -62,6 +62,8 @@ kind: "package-reference"
 
 `unicode61` tokenizer 匹配 token 与短语，而非任意子字符串：`AI` 不匹配 token `BRAID`。需要执行字面、空白灵活的字符串子串扫描时，使用带 `text` 子句的 `ctx.sessionQuery.filterEvents()`。
 
+跨会话搜索默认在存储格式不受支持时严格失败。显式设置 `unsupportedSessionPolicy: 'report'` 仅排除以 `SessionFormatUnsupportedError` 拒绝的冷读取，在 `unavailableSessions` 中返回符合会话过滤条件的标识，并以原子事务移除其陈旧派生索引。源文件保持不变，此选项不授予恢复执行能力。`unavailableSessions` 为空表示观察到且符合会话过滤条件的会话均可搜索；否则调用方必须显示部分覆盖，即使没有命中项。该列表遵守会话过滤条件，不判断无法读取的事件过滤条件。不受支持集合的版本变化使游标失效；更换策略会拒绝旧游标。I/O、损坏、列表失败、取消和会话内搜索仍严格失败。 标识列表最多返回请求的命中项上限；`unavailableSessionCount` 给出完整的过滤后总数，调用方据此说明尚未列出的标识。
+
 ### 何时推迟或关闭搜索
 
 使用 `openAt: first-search` 时，服务在不导入 `node:sqlite`、不打开索引的情况下激活，把 SQLite 的实验性警告推迟到首次实际搜索；无效数据库让首次搜索失败，而不是服务激活失败。使用 `openAt: never` 时，全文搜索对该部署关闭：`searchSessions` 与 `searchEvents` 在任何请求规范化之前就以 `SESSION_QUERY_SEARCH_DISABLED` 失败，而继承的全部精确读取、过滤与追踪保持可用。请求超过编译谓词预算（跨会话 14 个组合谓词、会话内 13 个）或 SQLite 可移植的 32,766 绑定上限时，会在准备语句前以 `SESSION_QUERY_INVALID_FILTER` 失败。

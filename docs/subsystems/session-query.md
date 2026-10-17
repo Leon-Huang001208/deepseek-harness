@@ -160,6 +160,11 @@ type SessionSearchCursor = Branded<'SessionSearchCursor'>
 interface SessionSearchRequest {
   /** Full-text query interpreted as data, never executable FTS syntax. */
   query: string
+  /**
+   * Default `fail` refuses unsupported stored formats. `report` excludes and
+   * reports them without changing source artifacts. Other persistence failures still reject.
+   */
+  unsupportedSessionPolicy?: 'fail' | 'report'
   /** Logical-session predicates applied before event ranking. */
   sessionFilters?: readonly SessionResultFilter[]
   /** Event predicates applied before event ranking. */
@@ -194,6 +199,10 @@ interface SessionSearchPage<T> {
   items: readonly T[]
   /** Opaque continuation cursor, absent on the final page. */
   nextCursor?: SessionSearchCursor
+  /** Present only in report mode: unsupported matching sessions not searched, capped at the requested hit limit. */
+  unavailableSessions?: readonly { sessionId: SessionId; reason: 'unsupported-format' }[]
+  /** Total unsupported matching sessions in report mode; may exceed the bounded identity list. */
+  unavailableSessionCount?: number
 }
 ```
 

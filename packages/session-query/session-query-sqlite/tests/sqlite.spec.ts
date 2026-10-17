@@ -13,6 +13,7 @@ import SessionPersistence, {
   SessionPersistenceNotFoundError,
   SessionPersistenceRevision,
   SessionReadOnlyError,
+  SessionFormatUnsupportedError,
 } from '@deepseek-ai/dsh-session-persistence'
 import type {
   SessionAccess,
@@ -98,6 +99,7 @@ class TestHandle implements SessionHandle {
     TestPersistence.reads.set(this.id, (TestPersistence.reads.get(this.id) ?? 0) + 1)
     TestPersistence.readSignals.push(options?.signal)
     if (TestPersistence.failure !== undefined) throw TestPersistence.failure
+    if (TestPersistence.readFailures.has(this.id)) throw TestPersistence.readFailures.get(this.id)
     const entry = TestPersistence.entries.get(this.id)
     if (entry === undefined) throw new SessionPersistenceNotFoundError(this.id)
     await TestPersistence.readEffect?.(entry, options?.signal)
@@ -144,6 +146,7 @@ class TestPersistence extends SessionPersistence {
   static listEffect: ((signal?: AbortSignal) => void | Promise<void>) | undefined
   static listOverride: (() => SessionPersistenceSnapshot[]) | undefined
   static failure: unknown
+  static readFailures = new Map<SessionIdType, Error>()
 
   static reset(entries: readonly { meta: SessionHeader; events: SessionEvent[] }[] = []): void {
     this.entries = new Map()
@@ -158,6 +161,7 @@ class TestPersistence extends SessionPersistence {
     this.listEffect = undefined
     this.listOverride = undefined
     this.failure = undefined
+    this.readFailures = new Map()
   }
 
   static set(entry: { meta: SessionHeader; events: SessionEvent[] }): void {
@@ -212,6 +216,106 @@ async function liveContext(config: ConstructorParameters<typeof SqliteSessionQue
 }
 
 describe('SQLite session search', () => {
+  it('reports unsupported histories only on explicit request and excludes stale indexed bodies', async () => {
+    const ctx = await liveContext()
+    const good = header('readable')
+    const old = header('unsupported')
+    TestPersistence.reset([
+      { meta: good, events: messageEvents('needle') },
+      { meta: old, events: messageEvents('needle') },
+    ])
+    const persistence = await ctx.plugin(TestPersistence)
+    try {
+      expect((await ctx.sessionQuery.searchSessions({ query: 'needle' })).items).toHaveLength(2)
+      TestPersistence.set({ meta: old, events: messageEvents('needle') })
+      TestPersistence.readFailures.set(old.id, new SessionFormatUnsupportedError('unsupported descriptor version 2'))
+      await expect(ctx.sessionQuery.searchSessions({ query: 'needle' }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_PERSISTENCE_FAILED' })
+      const result = await ctx.sessionQuery.searchSessions({ query: 'needle', unsupportedSessionPolicy: 'report' })
+      expect(result.items.map(hit => hit.header.id)).toEqual([good.id])
+      expect(result.unavailableSessions).toEqual([{ sessionId: old.id, reason: 'unsupported-format' }])
+      await expect(ctx.sessionQuery.searchSessions({ query: 'needle' }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_PERSISTENCE_FAILED' })
+      TestPersistence.readFailures.clear()
+      const repaired = await ctx.sessionQuery.searchSessions({ query: 'needle', unsupportedSessionPolicy: 'report' })
+      expect(repaired.items).toHaveLength(2)
+      expect(repaired.unavailableSessions).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+      await persistence.dispose()
+    }
+  })
+
+  it('does not report I/O failures or cancellation as unsupported history', async () => {
+    const ctx = await liveContext()
+    const meta = header('broken')
+    TestPersistence.reset([{ meta, events: messageEvents('needle') }])
+    const persistence = await ctx.plugin(TestPersistence)
+    try {
+      TestPersistence.readFailures.set(meta.id, new Error('I/O failed'))
+      await expect(ctx.sessionQuery.searchSessions({ query: 'needle', unsupportedSessionPolicy: 'report' }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_PERSISTENCE_FAILED' })
+      const imitation = new Error('unsupported format')
+      imitation.name = 'SessionFormatUnsupportedError'
+      TestPersistence.readFailures.set(meta.id, imitation)
+      await expect(ctx.sessionQuery.searchSessions({ query: 'needle', unsupportedSessionPolicy: 'report' }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_PERSISTENCE_FAILED' })
+      const abort = new AbortController()
+      abort.abort()
+      await expect(ctx.sessionQuery.searchSessions({ query: 'needle', unsupportedSessionPolicy: 'report' }, { signal: abort.signal }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_ABORTED' })
+    } finally {
+      await ctx.fiber.dispose()
+      await persistence.dispose()
+    }
+  })
+
+  it('filters unavailable identities, invalidates cursors on coverage changes, and keeps event search strict', async () => {
+    const ctx = await liveContext()
+    const a = header('a', 3)
+    const b = header('b', 2)
+    const old = header('private', 1, { cwd: '/private' })
+    TestPersistence.reset([a, b].map(meta => ({ meta, events: messageEvents('needle') })))
+    const persistence = await ctx.plugin(TestPersistence)
+    try {
+      const request = { query: 'needle', limit: 1, unsupportedSessionPolicy: 'report' } as const
+      const first = await ctx.sessionQuery.searchSessions(request)
+      expect(first.nextCursor).toBeDefined()
+      TestPersistence.set({ meta: old, events: [] })
+      TestPersistence.readFailures.set(old.id, new SessionFormatUnsupportedError('unsupported'))
+      await expect(ctx.sessionQuery.searchSessions({ ...request, cursor: first.nextCursor! }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_STALE_CURSOR' })
+      const current = await ctx.sessionQuery.searchSessions(request)
+      const again = await ctx.sessionQuery.searchSessions({ ...request, cursor: current.nextCursor! })
+      expect(again.items).toHaveLength(1)
+      expect(again.unavailableSessions).toHaveLength(1)
+      const filtered = await ctx.sessionQuery.searchSessions({
+        ...request, query: 'nohit', sessionFilters: [{ kind: 'id', values: [a.id] }],
+      })
+      expect(filtered).toEqual({ items: [], unavailableSessions: [], unavailableSessionCount: 0 })
+      expect((await ctx.sessionQuery.searchSessions({ ...request, query: 'nohit' })).unavailableSessions)
+        .toEqual([{ sessionId: old.id, reason: 'unsupported-format' }])
+      await expect(ctx.sessionQuery.searchEvents({ sessionId: a.id, query: 'needle' }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_PERSISTENCE_FAILED' })
+      const extra = header('another-unsupported')
+      TestPersistence.set({ meta: extra, events: [] })
+      TestPersistence.readFailures.set(extra.id, new SessionFormatUnsupportedError('unsupported'))
+      const bounded = await ctx.sessionQuery.searchSessions(request)
+      expect(bounded.unavailableSessions).toHaveLength(1)
+      expect(bounded.unavailableSessionCount).toBe(2)
+      TestPersistence.entries.delete(extra.id)
+      TestPersistence.entries.delete(old.id)
+      await expect(ctx.sessionQuery.searchSessions({ ...request, cursor: current.nextCursor! }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_STALE_CURSOR' })
+      const readable = await ctx.sessionQuery.searchSessions(request)
+      await expect(ctx.sessionQuery.searchSessions({ ...request, unsupportedSessionPolicy: 'fail', cursor: readable.nextCursor! }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_INVALID_CURSOR' })
+    } finally {
+      await ctx.fiber.dispose()
+      await persistence.dispose()
+    }
+  })
+
   it('forgets persisted derived rows immediately and invalidates existing cursors', async () => {
     const path = await temporaryPath()
     const ctx = await liveContext({ path })

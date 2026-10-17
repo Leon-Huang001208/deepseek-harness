@@ -66,6 +66,7 @@ export interface QueryLimits {
 /** Normalized cross-session request. */
 export interface NormalizedSessionRequest {
   query: string
+  unsupportedSessionPolicy: 'fail' | 'report'
   sessionFilters: readonly SessionResultFilter[]
   eventFilters: readonly SessionEventMetadataFilter[]
   limit: number
@@ -101,11 +102,16 @@ export function normalizeSessionRequest(
   request: SessionSearchRequest,
   limits: QueryLimits,
 ): NormalizedSessionRequest {
+  const unsupportedSessionPolicy: unknown = request.unsupportedSessionPolicy === undefined ? 'fail' : request.unsupportedSessionPolicy
+  if (unsupportedSessionPolicy !== 'fail' && unsupportedSessionPolicy !== 'report') {
+    throw new SessionQueryError('session-search unsupportedSessionPolicy must be fail or report', 'SESSION_QUERY_INVALID_FILTER')
+  }
   const sessionFilters = materializeSessionResultFilters(request.sessionFilters ?? [])
   const eventFilters = materializeMetadataFilters(request.eventFilters ?? [])
   const cursor = materializeCursor(request.cursor)
   return {
     query: normalizeQuery(request.query),
+    unsupportedSessionPolicy,
     sessionFilters,
     eventFilters,
     limit: normalizeLimit(request.limit, limits),
@@ -253,6 +259,7 @@ export function requestFingerprint(request: NormalizedSessionRequest | Normalize
   }
   return JSON.stringify({
     scope: 'sessions',
+    unsupportedSessionPolicy: request.unsupportedSessionPolicy,
     query: request.query,
     sessionFilters: canonicalFilters(request.sessionFilters),
     eventFilters: canonicalFilters(request.eventFilters),

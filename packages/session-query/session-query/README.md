@@ -50,6 +50,8 @@ Body-free records expose only `SessionHeader.isSeeded`. Reads that return event 
 
 The text clause is a literal, case-insensitive, whitespace-flexible scan of extracted semantic text — not a full-text query. Use it for arbitrary substring recall; use the mounted backend's search methods when you need ranked full-text results.
 
+With the SQLite backend, `searchSessions({ query, unsupportedSessionPolicy: 'report' })` returns `unavailableSessions` alongside hits. These are unsupported-format sessions matching the session filters whose bodies were not searched; event filters cannot be evaluated for them. Callers must display incomplete coverage, including when there are no hits, and enforce authorization on both hits and unavailable identities. Omitted policy means strict failure; exact reads and `searchEvents` remain strict. The identity list is capped at the requested hit limit; `unavailableSessionCount` reports the full filtered count, so callers can disclose omitted identities.
+
 ### Configuration
 
 The inherited knobs are set through the mounted backend's config:

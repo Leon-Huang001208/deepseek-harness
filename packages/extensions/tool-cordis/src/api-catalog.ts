@@ -7164,11 +7164,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionSearchPage',
-    declaration: 'export interface SessionSearchPage<T> {\n    items: readonly T[];\n    nextCursor?: SessionSearchCursor;\n}',
+    declaration: 'export interface SessionSearchPage<T> {\n    items: readonly T[];\n    nextCursor?: SessionSearchCursor;\n    unavailableSessions?: readonly {\n        sessionId: SessionId;\n        reason: \'unsupported-format\';\n    }[];\n    unavailableSessionCount?: number;\n}',
   },
   {
     name: 'SessionSearchValue',
-    declaration: 'export interface SessionSearchValue {\n    readonly items: readonly SessionSearchItem[];\n    readonly hasMore: boolean;\n}',
+    declaration: 'export interface SessionSearchValue {\n    readonly items: readonly SessionSearchItem[];\n    readonly hasMore: boolean;\n    readonly coverage?: {\n        readonly unavailableSessionCount: number;\n        readonly unlistedSessionCount: number;\n    };\n}',
   },
   {
     name: 'SessionSeedEventState',

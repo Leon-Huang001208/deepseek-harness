@@ -528,8 +528,8 @@ class JsonlSessionPersistence extends SessionPersistence {
     options?.signal?.throwIfAborted()
     this.tracker.claimWrite(id)
     let lease: SessionWriteLease | undefined
-    let operationFailure: unknown
-    let releaseFailure: unknown
+    let operationFailure: Error | undefined
+    let releaseFailure: Error | undefined
     try {
       const selected = await this.findLog(id, options?.signal)
       if (selected === undefined) throw new SessionPersistenceNotFoundError(id)
@@ -552,12 +552,12 @@ class JsonlSessionPersistence extends SessionPersistence {
       }
       this.coldLogMemo.delete(id)
     } catch (error: unknown) {
-      operationFailure = error
+      operationFailure = error instanceof Error ? error : new Error('session delete failed', { cause: error })
     } finally {
       try {
         await lease?.release()
       } catch (error: unknown) {
-        releaseFailure = error
+        releaseFailure = error instanceof Error ? error : new Error('session delete lease release failed', { cause: error })
       }
       this.tracker.releaseClaim(id)
     }
