@@ -26,6 +26,7 @@ import SessionStore, {
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
+import type { SessionProjectionSummaryExcluded } from '@deepseek-ai/dsh-session-projection/types'
 import Storage from '@deepseek-ai/dsh-storage'
 import {
   apply as storageJsonApply, Config as storageJsonConfig, inject as storageJsonInject, name as storageJsonName,
@@ -33,24 +34,17 @@ import {
 import {
   apply as storageDomainApply, Config as storageDomainConfig, inject as storageDomainInject, name as storageDomainName,
 } from '@deepseek-ai/dsh-storage-domain'
+import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import SessionProjectionCache from '../src/index.ts'
 import { checkpointRecord, projectionCacheDomainSpec } from '../src/spec.ts'
 import type { CheckpointRecord } from '../src/spec.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionStateMap {
-    'cache-test/marks': MarksState
-    'cache-test/secondary-marks': MarksState
-    'cache-test/marks2': Map<string, string>
-    'cache-test/count': number
-    'cache-test/secret': string
-    'cache-test/marks3': MarksState
-    title: string | null
-  }
   interface SessionProjectionMap {
     'cache-test/marks': { marks: string[] }
     'cache-test/secondary-marks': { marks: string[] }
     'cache-test/marks3': { marks: string[] }
+    'cache-test/summary-excluded': SessionProjectionSummaryExcluded<{ n: number }>
     title: string | null
   }
 }
@@ -110,6 +104,16 @@ const secondaryMarksUnit = {
   stateVersion: 1,
 } satisfies ProjectionDefinition<'cache-test/secondary-marks', MarksState>
 
+/** A summary-excluded unit: its rows must never reach the summary block. */
+const summaryExcludedUnit = {
+  key: 'cache-test/summary-excluded',
+  stateSchema: z.object({ n: z.number() }),
+  init: () => ({ n: 0 }),
+  apply: state => state,
+  wire: { viewSchema: z.object({ n: z.number() }), view: state => state, summary: false },
+  stateVersion: 1,
+} satisfies ProjectionDefinition<'cache-test/summary-excluded', { n: number }>
+
 /** Mirrors the shipped title unit's storage face (stateVersion 1, bare-string state). */
 const titleUnit = {
   key: 'title',
@@ -149,9 +153,14 @@ async function harness(options: HarnessOptions = {}) {
   await ctx.plugin({ name: storageDomainName, inject: storageDomainInject, apply: storageDomainApply, Config: storageDomainConfig }, { backend: 'json' })
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
-  ctx.sessionProjections.register(marksUnit(options.stateVersion))
+  await ctx.sessionProjections.register(marksUnit(options.stateVersion))
+  const opened = vi.spyOn(ctx.storageDomain, 'open')
   const fiber = await ctx.plugin(SessionProjectionCache, options.config ?? { writeEveryEvents: 100, writeIntervalMs: 60_000 })
-  return { ctx, root, fiber, cache: ctx.sessionProjectionCache }
+  const opening = opened.mock.results[0]?.value as Promise<Domain<typeof projectionCacheDomainSpec>> | undefined
+  const domain = await opening
+  opened.mockRestore()
+  if (domain === undefined) throw new Error('cache domain was not opened')
+  return { ctx, root, fiber, cache: ctx.sessionProjectionCache, table: domain.table('sessions') }
 }
 
 const mark = (session: Session, marks: string[]): SessionEvent =>
@@ -211,6 +220,78 @@ afterEach(async () => {
 })
 
 describe('SessionProjectionCache write policy', () => {
+  it('drains an admitted cold write before deleting its durable record', async () => {
+    const { ctx, root, cache, table } = await harness()
+    const meta = headerOf(SessionId('delete-cold-pending'))
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const put = table.put.bind(table)
+    vi.spyOn(table, 'put').mockImplementationOnce(async (id, record) => {
+      entered.resolve(undefined)
+      await release.promise
+      await put(id, record)
+    })
+    const written = whenWritten(ctx, meta.id)
+    cache.coldSnapshot(meta, SessionLogOffset(0), [])
+    await entered.promise
+    const unrelated = headerOf(SessionId('unrelated-cold-write'))
+    const unrelatedWritten = whenWritten(ctx, unrelated.id)
+    cache.coldSnapshot(unrelated, SessionLogOffset(0), [])
+    await unrelatedWritten
+    expect(await storedRecord(root, unrelated.id)).toBeDefined()
+    let settled = false
+    const deleting = cache.delete(meta.id).then((value) => { settled = true; return value })
+    try {
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBe(false)
+    } finally { release.resolve(undefined) }
+    await written
+    await deleting
+    expect(await storedRecord(root, meta.id)).toBeUndefined()
+    expect(cache.cachedSnapshot(meta)).toBeUndefined()
+  })
+
+  it('drains admitted cold writes before closing the cache domain', async () => {
+    const { ctx, root, cache, table, fiber } = await harness()
+    const meta = headerOf(SessionId('dispose-cold-pending'))
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const put = table.put.bind(table)
+    vi.spyOn(table, 'put').mockImplementationOnce(async (id, record) => {
+      entered.resolve(undefined)
+      await release.promise
+      await put(id, record)
+    })
+    const written = whenWritten(ctx, meta.id)
+    cache.coldSnapshot(meta, SessionLogOffset(0), [])
+    await entered.promise
+    const disposing = fiber.dispose()
+    release.resolve(undefined)
+    await written
+    await disposing
+    expect(await storedRecord(root, meta.id)).toBeDefined()
+  })
+
+  it('drains a live checkpoint admitted before its log flush completes', async () => {
+    const { ctx, root, cache } = await harness()
+    const session = ctx.sessions.create(SessionId('delete-flushing'))
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    vi.spyOn(ctx.sessions, 'flush').mockImplementationOnce(async () => {
+      entered.resolve(undefined)
+      await release.promise
+      return true
+    })
+    const writing = cache.write(session)
+    await entered.promise
+    const deleting = cache.delete(session.id)
+    release.resolve(undefined)
+    await writing
+    await deleting
+    expect(await storedRecord(root, session.id)).toBeUndefined()
+  })
+
   it('permanently removes a stored checkpoint', async () => {
     const { ctx, root, cache } = await harness()
     const session = ctx.sessions.create(SessionId('delete-checkpoint'))
@@ -314,7 +395,7 @@ describe('SessionProjectionCache write policy', () => {
     await ctx.sessionProjectionCache.write(clean)
     expect((await storedRows(root, clean.id))?.['cache-test/marks']).toEqual({ ver: 1, seq: -1, val: null })
     // A unit whose state violates the plain-JSON contract fails the write loud.
-    ctx.sessionProjections.register({
+    await ctx.sessionProjections.register({
       key: 'cache-test/marks2',
       stateSchema: z.custom<Map<string, string>>(() => true),
       init: () => new Map<string, string>(),
@@ -350,7 +431,7 @@ describe('SessionProjectionCache write policy', () => {
     await ctx.plugin({ name: storageDomainName, inject: storageDomainInject, apply: storageDomainApply, Config: storageDomainConfig }, { backend: 'json' })
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
-    ctx.sessionProjections.register(marksUnit())
+    await ctx.sessionProjections.register(marksUnit())
     await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     // A directory where the record document must land makes the atomic
@@ -401,7 +482,7 @@ describe('SessionProjectionCache listing read', () => {
       'cache-test/secondary-marks': { ver: 1, seq: SessionSeq(6), val: { marks: ['secondary'] } },
     })
     const { ctx, cache } = await harness({ root })
-    ctx.sessionProjections.register(secondaryMarksUnit)
+    await ctx.sessionProjections.register(secondaryMarksUnit)
 
     // The block carries one watermark: the seq every served value has folded
     // through at least, so the lower of the two rows names the block.
@@ -471,7 +552,7 @@ describe('SessionProjectionCache listing read', () => {
       },
     )
     const { ctx, cache } = await harness({ root })
-    ctx.sessionProjections.register(titleUnit)
+    await ctx.sessionProjections.register(titleUnit)
     const seededHeader = { ...headerOf(id), isSeeded: true }
 
     // An older format generation never serves the full block, but its title
@@ -523,7 +604,7 @@ describe('SessionProjectionCache listing read', () => {
       'cache-test/secret': { ver: 1, seq: SessionSeq(4), val: 'private prompt text' },
     })
     const { ctx, cache } = await harness({ root })
-    ctx.sessionProjections.register(secretUnit)
+    await ctx.sessionProjections.register(secretUnit)
     const header = headerOf(SessionId('host-state'))
 
     expect(cache.cachedSnapshot(header)).toEqual({
@@ -560,7 +641,7 @@ describe('SessionProjectionCache listing read', () => {
       'cache-test/marks3': { ver: 1, seq: SessionSeq(4), val: { marks: ['b'] } },
     })
     const { ctx, cache } = await harness({ root })
-    ctx.sessionProjections.register(marks3Unit)
+    await ctx.sessionProjections.register(marks3Unit)
     const block = cache.cachedSnapshot(headerOf(SessionId('multi-row')))
     expect(block?.values).toEqual({
       'cache-test/marks': { marks: ['a'] },
@@ -766,7 +847,7 @@ describe('SessionProjectionCache cold-read seeding', () => {
     })
     const { cache, ctx } = await harness({ root })
     const apply = vi.fn((_state: number, _event: SessionEvent) => 1)
-    ctx.sessionProjections.register({
+    await ctx.sessionProjections.register({
       key: 'cache-test/count',
       stateSchema: z.number().int().nonnegative(),
       init: () => 0,
@@ -808,7 +889,7 @@ describe('SessionProjectionCache cold-read seeding', () => {
     await ctx.plugin({ name: storageDomainName, inject: storageDomainInject, apply: storageDomainApply, Config: storageDomainConfig }, { backend: 'json' })
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
-    ctx.sessionProjections.register(marksUnit())
+    await ctx.sessionProjections.register(marksUnit())
     await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     // A directory where the record document must land makes the write-back
@@ -821,5 +902,35 @@ describe('SessionProjectionCache cold-read seeding', () => {
     await vi.waitFor(() => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('cold-read write-back for "cold-fail" failed'))
     }, { timeout: 5_000 })
+  })
+})
+
+describe('SessionProjectionCache summary reads', () => {
+  it('serves the summary block from stored rows and excludes the marked unit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    await seedRecord(root, 'summary-watermark', {
+      'cache-test/marks': { ver: 1, seq: SessionSeq(5), val: { marks: ['primary'] } },
+      'cache-test/summary-excluded': { ver: 1, seq: SessionSeq(1), val: { n: 3 } },
+    })
+    const { ctx, cache } = await harness({ root })
+    await ctx.sessionProjections.register(summaryExcludedUnit)
+    const summaryKeys = ctx.sessionProjections.summaryKeys()
+
+    // The summary watermark follows the served rows only: the marked row sits
+    // at seq 1, and its absence must not drag the summary block down.
+    expect(cache.cachedSnapshot(headerOf(SessionId('summary-watermark')), summaryKeys)).toEqual({
+      asOfSeq: 5,
+      values: { 'cache-test/marks': { marks: ['primary'] } },
+    })
+    expect(cache.cachedSnapshot(headerOf(SessionId('summary-watermark')))).toEqual({
+      asOfSeq: 1,
+      values: {
+        'cache-test/marks': { marks: ['primary'] },
+        'cache-test/summary-excluded': { n: 3 },
+      },
+    })
+    // No record for this id: a key-subset read reports absence like the complete face.
+    expect(cache.cachedSnapshot(headerOf(SessionId('summary-absent')), summaryKeys)).toBeUndefined()
   })
 })

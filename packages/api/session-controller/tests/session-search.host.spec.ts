@@ -17,7 +17,7 @@ import {
   type SessionSearchHit,
   type SessionSearchRequest,
 } from '@deepseek-ai/dsh-session-query'
-import { createSessionTestRemote, testSessionPersistence } from './test-remote.ts'
+import { createSessionTestRemote, testSessionPersistence, TEST_IMAGE_LIMITS } from './test-remote.ts'
 import { ApiSessionList } from '../src/list.ts'
 
 const sid = (value: string): SessionId => value as SessionId
@@ -57,8 +57,8 @@ function hit(id: string, index = 0): SessionSearchHit {
 async function baseContext(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
-  await ctx.plugin(AgentRegistry)
   await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(AgentRegistry)
   return ctx
 }
 
@@ -94,6 +94,23 @@ function installSearchQuery(
 }
 
 describe('session.search', () => {
+  it('excludes histories outside caller access before incomplete coverage is counted', async () => {
+    const ctx = await baseContext()
+    ctx.sessions.create(sid('owned'), { meta: header('owned') })
+    ctx.sessions.create(sid('private'), { meta: header('private') })
+    const searchSessions = vi.fn(async (query: SessionSearchRequest) => {
+      expect(query.sessionFilters).toEqual([{ kind: 'id', values: [sid('owned')] }])
+      return { items: [], unavailableSessions: [], unavailableSessionCount: 0 }
+    })
+    installSearchQuery(ctx, searchSessions)
+    try {
+      const value = await new ApiSessionList(ctx, 8).search('needle', new AbortController().signal,
+        { unsupportedSessionPolicy: 'report' }, id => id === sid('owned'))
+      expect(value.coverage).toEqual({ unavailableSessionCount: 0, unlistedSessionCount: 0 })
+      expect(searchSessions).toHaveBeenCalledOnce()
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('scopes explicit partial searches before counting unsupported histories', async () => {
     const ctx = await baseContext()
     ctx.sessions.create(sid('owned'), { meta: header('owned') })
@@ -105,7 +122,7 @@ describe('session.search', () => {
     })
     installSearchQuery(ctx, searchSessions)
     try {
-      const response = await createSessionTestRemote(ctx, defaults).search({
+      const response = await (await createSessionTestRemote(ctx, defaults)).search({
         query: 'needle', sessionIds: [sid('owned'), sid('unknown')], unsupportedSessionPolicy: 'report',
       }, new AbortController().signal)
       expect(response).toMatchObject({
@@ -136,7 +153,9 @@ describe('session.search', () => {
 
   it('rejects search when the query service is absent', async () => {
     const ctx = await baseContext()
+    ctx.provide('attachments', { imageLimits: TEST_IMAGE_LIMITS } as never)
     const list = new ApiSessionList(ctx, 8)
+    await list.initialize()
 
     await expect(list.search('query', new AbortController().signal)).rejects.toMatchObject({
       code: 'gateway/internal',
@@ -191,7 +210,7 @@ describe('session.search', () => {
       ],
     }))
     installSearchQuery(ctx, searchSessions)
-    const remote = createSessionTestRemote(ctx, defaults)
+    const remote = await createSessionTestRemote(ctx, defaults)
     const signal = new AbortController().signal
 
     const response = await remote.search(request('  matching answer  '), signal)
@@ -227,7 +246,7 @@ describe('session.search', () => {
     ctx.sessions.create(sid('visible'), { meta: header('visible') })
     const searchSessions = vi.fn()
     installSearchQuery(ctx, searchSessions)
-    const remote = createSessionTestRemote(ctx, defaults)
+    const remote = await createSessionTestRemote(ctx, defaults)
 
     for (const query of ['', '   ', 'contains\0nul', 'x'.repeat(501)]) {
       await expect(remote.search(request(query), new AbortController().signal))
@@ -241,7 +260,7 @@ describe('session.search', () => {
     const ctx = await baseContext()
     const searchSessions = vi.fn()
     installSearchQuery(ctx, searchSessions)
-    const remote = createSessionTestRemote(ctx, defaults)
+    const remote = await createSessionTestRemote(ctx, defaults)
 
     const response = await remote.search(
       request('anything'),
@@ -275,7 +294,7 @@ describe('session.search', () => {
       ],
     }))
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('match'),
       new AbortController().signal,
     )
@@ -302,7 +321,7 @@ describe('session.search', () => {
       })
       .mockResolvedValueOnce({ items: items.slice(19) })
     installSearchQuery(ctx, searchSessions)
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('match'),
       new AbortController().signal,
     )
@@ -343,7 +362,7 @@ describe('session.search', () => {
     })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('adaptive-page-limit'),
       new AbortController().signal,
     )
@@ -386,7 +405,7 @@ describe('session.search', () => {
     })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('endless-pages'),
       new AbortController().signal,
     )
@@ -451,7 +470,7 @@ describe('session.search', () => {
     })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('stale-restart'),
       new AbortController().signal,
     )
@@ -490,7 +509,7 @@ describe('session.search', () => {
     })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('stale-churn'),
       new AbortController().signal,
     )
@@ -519,7 +538,7 @@ describe('session.search', () => {
       })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('abort-stale'),
       controller.signal,
     )
@@ -540,7 +559,7 @@ describe('session.search', () => {
     )))
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('first-page-stale'),
       new AbortController().signal,
     )
@@ -564,7 +583,7 @@ describe('session.search', () => {
       ))
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('continuation-invalid-limit'),
       new AbortController().signal,
     )
@@ -591,7 +610,7 @@ describe('session.search', () => {
     ))
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('minimum-page-limit'),
       new AbortController().signal,
     )
@@ -617,7 +636,7 @@ describe('session.search', () => {
     })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('abort-invalid-limit'),
       controller.signal,
     )
@@ -636,7 +655,7 @@ describe('session.search', () => {
     const searchSessions = vi.fn(() => Promise.resolve({ items: oversized }))
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('oversized-page'),
       new AbortController().signal,
     )
@@ -662,7 +681,7 @@ describe('session.search', () => {
     })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('adapted-oversized-page'),
       new AbortController().signal,
     )
@@ -688,7 +707,7 @@ describe('session.search', () => {
     }
     installSearchQuery(ctx, () => Promise.resolve({ items: [overlong] }))
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('bounded-snippet'),
       new AbortController().signal,
     )
@@ -710,7 +729,7 @@ describe('session.search', () => {
       .mockResolvedValueOnce({ items: [], nextCursor: 'repeated' })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('repeated-cursor'),
       new AbortController().signal,
     )
@@ -733,7 +752,7 @@ describe('session.search', () => {
       .mockResolvedValueOnce({ items: items.slice(20), nextCursor: 'repeated' })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('repeated-lookahead-cursor'),
       new AbortController().signal,
     )
@@ -760,7 +779,7 @@ describe('session.search', () => {
       .mockResolvedValueOnce({ items: items.slice(20) })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('duplicate-pages'),
       new AbortController().signal,
     )
@@ -788,7 +807,7 @@ describe('session.search', () => {
       })
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('cancel-continuation'),
       controller.signal,
     )
@@ -817,7 +836,7 @@ describe('session.search', () => {
     }))
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('large corpus'),
       new AbortController().signal,
     )
@@ -853,7 +872,7 @@ describe('session.search', () => {
     const searchSessions = vi.fn()
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('cancel-during-visibility'),
       controller.signal,
     )
@@ -880,7 +899,7 @@ describe('session.search', () => {
     const searchSessions = vi.fn(() => Promise.resolve({ items: [] }))
     installSearchQuery(ctx, searchSessions)
 
-    const response = await createSessionTestRemote(ctx, defaults).search(
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
       request('header-only-visibility'),
       new AbortController().signal,
     )
@@ -896,7 +915,7 @@ describe('session.search', () => {
   it('maps preflight cancellation, query cancellation, and provider failure', async () => {
     const missingCtx = await baseContext()
     missingCtx.sessions.create(sid('visible'), { meta: header('visible') })
-    const missingApi = createSessionTestRemote(missingCtx, defaults)
+    const missingApi = await createSessionTestRemote(missingCtx, defaults)
     const preAborted = new AbortController()
     preAborted.abort()
     const cancelledBeforeLookup = await missingApi.search(
@@ -915,7 +934,7 @@ describe('session.search', () => {
       .mockRejectedValueOnce(aborted)
       .mockRejectedValueOnce(new Error('database unavailable'))
     installSearchQuery(ctx, searchSessions)
-    const remote = createSessionTestRemote(ctx, defaults)
+    const remote = await createSessionTestRemote(ctx, defaults)
 
     const cancelled = await remote.search(
       request('first'),

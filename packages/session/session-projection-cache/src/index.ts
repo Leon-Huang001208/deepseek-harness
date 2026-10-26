@@ -28,6 +28,7 @@ import type {
 } from '@deepseek-ai/dsh-session'
 import type {
   ProjectionCheckpoint,
+  ProjectionKeySelection,
   ProjectionSnapshot,
   SessionProjectionMap,
 } from '@deepseek-ai/dsh-session-projection'
@@ -108,6 +109,7 @@ export class SessionProjectionCache extends Service {
 
   private table?: KvTable<SessionId, CheckpointRecord>
   private readonly dirty = new Map<Session, DirtyState>()
+  private readonly mutations = new Map<SessionId, Promise<void>>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'sessionProjectionCache')
@@ -116,7 +118,10 @@ export class SessionProjectionCache extends Service {
   /** Open the domain and install the write-behind listeners. */
   protected async [Service.init](): Promise<void> {
     const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
-    this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
+    this.ctx.effect(() => async () => {
+      await Promise.all(this.mutations.values())
+      await domain.close()
+    }, 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
     this.installWritePath()
   }
@@ -160,7 +165,7 @@ export class SessionProjectionCache extends Service {
    */
   cachedSnapshot(
     meta: SessionHeader,
-    keys?: readonly Extract<keyof SessionProjectionMap, string>[],
+    keys?: ProjectionKeySelection,
   ): ProjectionSnapshot | undefined {
     const expected = lifecycleIdentityOf(meta)
     const record = this.requireTable().get(meta.id)
@@ -199,7 +204,7 @@ export class SessionProjectionCache extends Service {
    */
   private viewRecord(
     record: CheckpointRecord,
-    keys?: readonly Extract<keyof SessionProjectionMap, string>[],
+    keys?: ProjectionKeySelection,
   ): ProjectionSnapshot | undefined {
     const values = this.ctx.sessionProjections.viewCheckpoint(record.rows, keys)
     let asOfSeq: ProjectionSnapshot['asOfSeq'] | undefined
@@ -263,22 +268,23 @@ export class SessionProjectionCache extends Service {
     // from events no stored log contains). At detach the store entry is
     // already gone; persistence's own retirement drain covers that path and
     // any residual overreach is caught by the cold read's anchored floor.
-    if (this.ctx.sessions.get(session.id) === session) await this.ctx.sessions.flush(session)
     await this.put(
       session.id,
       identityOf(session.header, session.inheritedEventCount),
       rows,
+      session,
     )
   }
 
   /**
-   * Permanently remove one session's derived checkpoint. The caller must
-   * quiesce live owners first so a later detach cannot recreate the record.
+   * Drain admitted checkpoint writes and remove one derived checkpoint.
+   * The caller must quiesce live owners and remove the authoritative log
+   * before its final invalidation so later cold reads cannot refill it.
    * @param id - session identity whose checkpoint must be removed.
    * @returns whether a stored checkpoint existed.
    */
   delete(id: SessionId): Promise<boolean> {
-    return this.requireTable().delete(id)
+    return this.serializeMutation(id, () => this.requireTable().delete(id))
   }
 
   /**
@@ -395,13 +401,33 @@ export class SessionProjectionCache extends Service {
     }
   }
 
+  /** Order each Session's writes and deletion from admission through durability. */
+  private async serializeMutation<Value>(id: SessionId, operation: () => Promise<Value>): Promise<Value> {
+    const result = (this.mutations.get(id) ?? Promise.resolve()).then(operation)
+    const settled = result.then(() => undefined, () => undefined)
+    this.mutations.set(id, settled)
+    try {
+      return await result
+    } finally {
+      if (this.mutations.get(id) === settled) this.mutations.delete(id)
+    }
+  }
+
   /** Replace one session's stored record with its log identity and a detached snapshot of `rows`. */
-  private async put(id: SessionId, identity: CheckpointIdentity, rows: ProjectionCheckpoint): Promise<void> {
+  private async put(
+    id: SessionId,
+    identity: CheckpointIdentity,
+    rows: ProjectionCheckpoint,
+    session?: Session,
+  ): Promise<void> {
     const detached = snapshotJsonValue(rows)
     if (detached === undefined) {
       throw new TypeError('projection checkpoint is not losslessly JSON-serializable (a unit state violates the plain-JSON contract)')
     }
-    await this.requireTable().put(id, { identity, rows: detached as CheckpointRecord['rows'] })
+    await this.serializeMutation(id, async () => {
+      if (session !== undefined && this.ctx.sessions.get(id) === session) await this.ctx.sessions.flush(session)
+      await this.requireTable().put(id, { identity, rows: detached as CheckpointRecord['rows'] })
+    })
   }
 
   private requireTable(): KvTable<SessionId, CheckpointRecord> {
